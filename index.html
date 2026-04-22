@@ -733,39 +733,76 @@ function confirmClock(){
   const now=new Date();
   const photo = capturedPhoto==="no-cam"?null:capturedPhoto;
   const reason = document.getElementById("reason-ta").value.trim()||null;
+  const eventId = "ce"+Date.now();
 
-  // Event stored on server — NO photo (photos are large base64 strings that
-  // exceed PropertiesService limits and cause silent write failures)
+  // Clock event saved to server WITHOUT photo (base64 is too large for PropertiesService)
+  // Photo is uploaded separately to Google Drive and the URL is patched back onto the event
   const serverEvent={
-    id:"ce"+Date.now(),empId:currentEmp.id,shiftId:currentShiftId,
-    type:currentAction,date:FD(now),time:now.toTimeString().slice(0,5),
-    photo:null, // photos stored locally only
-    reason:reason,ts:now.toISOString()
+    id:eventId, empId:currentEmp.id, shiftId:currentShiftId,
+    type:currentAction, date:FD(now), time:now.toTimeString().slice(0,5),
+    photo:null, photoUrl:null,
+    reason:reason, ts:now.toISOString()
   };
-  // Full event with photo stored only in localStorage for local viewing
-  const localEvent={...serverEvent,photo:photo};
+  // Local event keeps the base64 for immediate on-device viewing
+  const localEvent={...serverEvent, photo:photo};
 
-  // Get current events
   const serverEvents=(DB.get("clockEvents")||[]).concat([serverEvent]);
   const localEvents=serverEvents.map((e,i)=>i===serverEvents.length-1?localEvent:e);
 
-  // Write full (with photo) to localStorage immediately
+  // Write local (with photo) immediately
   CACHE['rx3_clockEvents']=localEvents;
   try{localStorage.setItem('rx3_clockEvents',JSON.stringify(localEvents));}catch(e){}
 
-  // Write to server (without photos to stay under size limits)
+  // Write to server without photo
   const payload=JSON.stringify(serverEvents);
   console.log('Writing clockEvents to server:',serverEvents.length,'events,',payload.length,'bytes');
   _gasPost({action:'set',dataKey:'rx3_clockEvents',value:payload})
     .then(()=>{
       console.log('Clock event saved to server OK');
       CACHE['rx3_clockEvents']=localEvents;
+      // ── Upload photo to Google Drive ──────────────────────
+      // Runs after event is confirmed on server so the patch has a record to update
+      if(photo){
+        _gasPost({
+          action:'uploadClockPhoto',
+          eventId: eventId,
+          empId:   currentEmp.id,
+          type:    currentAction,
+          date:    FD(now),
+          time:    now.toTimeString().slice(0,5),
+          data:    photo
+        })
+        .then(r=>{
+          if(r.ok&&r.result&&r.result.url){
+            console.log('Clock photo uploaded to Drive:',r.result.url);
+            // Patch the local cache so the URL is available immediately
+            const cached=CACHE['rx3_clockEvents']||[];
+            const idx=cached.findIndex(e=>e.id===eventId);
+            if(idx>=0){
+              cached[idx].photoUrl=r.result.url;
+              CACHE['rx3_clockEvents']=cached;
+              try{localStorage.setItem('rx3_clockEvents',JSON.stringify(cached));}catch(e){}
+            }
+          } else {
+            console.warn('Photo upload response:',r);
+          }
+        })
+        .catch(err=>console.error('Clock photo upload failed:',err));
+      }
     })
     .catch(err=>{
       console.error('Server write failed:',err,'Retrying in 3s...');
       setTimeout(()=>_gasPost({action:'set',dataKey:'rx3_clockEvents',value:payload})
-        .then(()=>console.log('Retry succeeded'))
-        .catch(()=>console.error('Both retry attempts failed')),3000);
+        .then(()=>{
+          console.log('Retry succeeded');
+          // Also retry photo upload
+          if(photo){
+            _gasPost({action:'uploadClockPhoto',eventId,empId:currentEmp.id,type:currentAction,date:FD(now),time:now.toTimeString().slice(0,5),data:photo})
+              .then(r=>console.log('Retry photo upload:',r.ok))
+              .catch(()=>console.error('Retry photo upload also failed'));
+          }
+        })
+        .catch(()=>console.error('Both clock event retry attempts failed')),3000);
     });
 
   showSuccess();
