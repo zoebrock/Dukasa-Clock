@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RosterRx — Clock Event Recovery</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f3;padding:20px;color:#181816}
+h1{font-size:20px;font-weight:700;color:#534AB7;margin-bottom:4px}
+.sub{font-size:13px;color:#58584e;margin-bottom:20px}
+.card{background:#fff;border:1px solid #dddcd5;border-radius:10px;padding:18px;margin-bottom:14px}
+label{font-size:12px;font-weight:600;color:#58584e;display:block;margin-bottom:4px}
+input,textarea{width:100%;border:1px solid #dddcd5;border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit}
+textarea{height:120px;resize:vertical}
+.btn{display:inline-block;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:none;margin-top:10px}
+.btn-primary{background:#534AB7;color:#fff}
+.btn-danger{background:#A32D2D;color:#fff;margin-left:8px}
+.btn-green{background:#0F6E56;color:#fff}
+.status{margin-top:12px;padding:10px 14px;border-radius:8px;font-size:13px;display:none}
+.ok{background:#E1F5EE;color:#0F6E56;border:1px solid #9de0ca}
+.err{background:#FCEBEB;color:#A32D2D;border:1px solid #f5b5b5}
+.warn{background:#FAEEDA;color:#633806;border:1px solid #FAC775}
+pre{background:#f0efe9;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto;white-space:pre-wrap;margin-top:10px;max-height:300px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+th{background:#f0efe9;padding:7px 10px;text-align:left;font-weight:600;color:#58584e}
+td{padding:7px 10px;border-bottom:1px solid #e8e7e1}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700}
+.in{background:#E1F5EE;color:#0F6E56}
+.out{background:#EEEDFE;color:#534AB7}
+.brk{background:#FAEEDA;color:#BA7517}
+</style>
+</head>
+<body>
+<h1>🔧 RosterRx — Clock Event Recovery Tool</h1>
+<div class="sub">Run this page on the iPad to recover today's clock events and push them to the server.</div>
+
+<div class="card">
+  <label>Step 1 — GAS Proxy URL</label>
+  <input type="text" id="proxy-url" placeholder="https://dukasa-clock.vercel.app/api/gas" value="https://dukasa-clock.vercel.app/api/gas">
+  <label style="margin-top:10px">GAS API Key</label>
+  <input type="text" id="api-key" placeholder="Your GAS_API_KEY value">
+</div>
+
+<div class="card">
+  <label>Step 2 — Read local clock events from this device</label>
+  <button class="btn btn-primary" onclick="readLocal()">📖 Read from localStorage</button>
+  <div id="local-status" class="status"></div>
+  <div id="local-table"></div>
+</div>
+
+<div class="card">
+  <label>Step 3 — Push to server</label>
+  <p style="font-size:12px;color:#58584e;margin-bottom:10px">This will merge today's events with what's already on the server (no duplicates). Only events from today will be pushed.</p>
+  <button class="btn btn-green" id="push-btn" onclick="pushToServer()" disabled>⬆️ Push today's events to server</button>
+  <div id="push-status" class="status"></div>
+</div>
+
+<div class="card">
+  <label>Step 4 — Verify server data</label>
+  <button class="btn btn-primary" onclick="verifyServer()">✓ Check server events</button>
+  <div id="verify-status" class="status"></div>
+  <div id="verify-table"></div>
+</div>
+
+<script>
+let localEvents = [];
+const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+
+function show(id, msg, type) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'status ' + type;
+  el.style.display = 'block';
+}
+
+function renderTable(events, containerId) {
+  if (!events.length) { document.getElementById(containerId).innerHTML = '<p style="font-size:12px;color:#98988f;margin-top:8px">No events found.</p>'; return; }
+  const staff = JSON.parse(localStorage.getItem('rx3_staff') || '[]');
+  const getName = id => { const s = staff.find(x => x.id === id); return s ? s.first + ' ' + s.last : id; };
+  const badgeCls = { 'clock-in': 'in', 'clock-out': 'out', 'break-start': 'brk', 'break-end': 'brk' };
+  document.getElementById(containerId).innerHTML = `
+    <table>
+      <tr><th>Name</th><th>Type</th><th>Date</th><th>Time</th><th>Has photo?</th></tr>
+      ${events.map(e => `<tr>
+        <td>${getName(e.empId)}</td>
+        <td><span class="badge ${badgeCls[e.type]||'in'}">${e.type}</span></td>
+        <td>${e.date}</td>
+        <td>${e.time}</td>
+        <td>${e.photo ? '✓ yes' : '—'}</td>
+      </tr>`).join('')}
+    </table>
+    <p style="font-size:11px;color:#98988f;margin-top:6px">${events.length} event(s)</p>`;
+}
+
+function readLocal() {
+  try {
+    const raw = localStorage.getItem('rx3_clockEvents');
+    if (!raw) { show('local-status', 'No clock events found in localStorage on this device.', 'warn'); return; }
+    const all = JSON.parse(raw);
+    const todayEvents = all.filter(e => e.date === today);
+    localEvents = todayEvents;
+    show('local-status', `Found ${all.length} total events, ${todayEvents.length} from today (${today}).`, 'ok');
+    renderTable(todayEvents, 'local-table');
+    document.getElementById('push-btn').disabled = todayEvents.length === 0;
+  } catch(e) {
+    show('local-status', 'Error reading localStorage: ' + e.message, 'err');
+  }
+}
+
+async function gasPost(body) {
+  const url = document.getElementById('proxy-url').value.trim();
+  const key = document.getElementById('api-key').value.trim();
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, key })
+  });
+  return res.json();
+}
+
+async function gasGet(action) {
+  const url = document.getElementById('proxy-url').value.trim();
+  const key = document.getElementById('api-key').value.trim();
+  const res = await fetch(`${url}?action=${action}&key=${key}`);
+  return res.json();
+}
+
+async function pushToServer() {
+  if (!localEvents.length) { show('push-status', 'No local events to push.', 'warn'); return; }
+  const key = document.getElementById('api-key').value.trim();
+  if (!key) { show('push-status', 'Please enter your GAS API Key first.', 'err'); return; }
+
+  const btn = document.getElementById('push-btn');
+  btn.disabled = true; btn.textContent = 'Pushing...';
+  show('push-status', 'Reading server events...', 'warn');
+
+  try {
+    // Get current server events
+    const r = await gasGet('getAll');
+    let serverEvents = [];
+    if (r.ok && r.data && r.data['rx3_clockEvents']) {
+      serverEvents = JSON.parse(r.data['rx3_clockEvents']);
+    }
+    show('push-status', `Server has ${serverEvents.length} events. Merging ${localEvents.length} local events...`, 'warn');
+
+    // Merge — strip photos (too large), deduplicate by id
+    const serverIds = new Set(serverEvents.map(e => e.id));
+    const toAdd = localEvents
+      .filter(e => !serverIds.has(e.id))
+      .map(e => ({ ...e, photo: null })); // strip base64 photos
+
+    if (toAdd.length === 0) {
+      show('push-status', 'All local events already exist on server — nothing to push.', 'ok');
+      btn.disabled = false; btn.textContent = '⬆️ Push today\'s events to server';
+      return;
+    }
+
+    const merged = [...serverEvents, ...toAdd];
+    const wr = await gasPost({ action: 'set', dataKey: 'rx3_clockEvents', value: JSON.stringify(merged) });
+    if (wr.ok) {
+      show('push-status', `✓ Successfully pushed ${toAdd.length} new event(s) to server. Server now has ${merged.length} total events.`, 'ok');
+    } else {
+      show('push-status', 'Server write failed: ' + (wr.error || JSON.stringify(wr)), 'err');
+    }
+  } catch(e) {
+    show('push-status', 'Error: ' + e.message, 'err');
+  }
+  btn.disabled = false; btn.textContent = '⬆️ Push today\'s events to server';
+}
+
+async function verifyServer() {
+  const key = document.getElementById('api-key').value.trim();
+  if (!key) { show('verify-status', 'Please enter your GAS API Key first.', 'err'); return; }
+  try {
+    show('verify-status', 'Fetching from server...', 'warn');
+    const r = await gasGet('getAll');
+    if (!r.ok) { show('verify-status', 'Server error: ' + (r.error || 'unknown'), 'err'); return; }
+    const all = r.data['rx3_clockEvents'] ? JSON.parse(r.data['rx3_clockEvents']) : [];
+    const todayServer = all.filter(e => e.date === today);
+    show('verify-status', `Server has ${all.length} total events, ${todayServer.length} from today.`, 'ok');
+    renderTable(todayServer, 'verify-table');
+  } catch(e) {
+    show('verify-status', 'Error: ' + e.message, 'err');
+  }
+}
+
+// Auto-read on load
+window.onload = () => { readLocal(); };
+</script>
+</body>
+</html>
