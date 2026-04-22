@@ -165,7 +165,7 @@ canvas{display:none}
 
 <div class="screen active" id="screen-home">
   <div class="home-hdr">
-    <div><div class="home-logo">Clock Dukasa</div><div class="home-logo-sub">Tap your name to clock in / out</div></div>
+    <div><div class="home-logo">Clock Dukasa</div><div class="home-logo-sub">Tap your name to clock in / out</div><div style="font-size:9px;color:var(--t3);margin-top:1px" id="clock-version"></div></div>
     <div><div class="live-clock" id="home-clock">--:--:--</div><div class="live-date" id="home-date"></div></div>
   </div>
   <div class="search-row">
@@ -287,6 +287,7 @@ canvas{display:none}
 //  Never overwrite local clockEvents with stale server data.
 // ═══════════════════════════════════════════════════════
 const PROXY = '/api/gas';
+const CLOCK_VERSION = '2.1'; // bump this to force cache awareness
 const CACHE = {};
 const DIRTY = {};
 
@@ -429,6 +430,11 @@ function _setSyncIndicator(state) {
   el.style.color = s.color;
   if (state === 'saved') setTimeout(() => _setSyncIndicator('idle'), 3000);
 }
+// Show version in header once DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+  const vEl = document.getElementById('clock-version');
+  if (vEl) vEl.textContent = 'v' + CLOCK_VERSION;
+});
 
 const ALL_KEYS = [
   'staff','shifts','clockEvents','leaveRequests','sickDays',
@@ -757,45 +763,50 @@ function confirmClock(){
     _gasPost({action:'appendClockEvent', event:serverEvent})
       .then(r=>{
         if(r.ok){
-          console.log('Clock event appended on server. Total events:',r.total,'Duplicate:',r.duplicate);
-          // ── Upload photo to Drive after event is confirmed ──
-          if(photo){
-            _gasPost({
-              action:'uploadClockPhoto',
-              eventId, empId:currentEmp.id, type:currentAction,
-              date:FD(now), time:now.toTimeString().slice(0,5),
-              data:photo
-            })
-            .then(pr=>{
-              if(pr.ok&&pr.result&&pr.result.url){
-                console.log('Clock photo saved to Drive:',pr.result.url);
-                // Patch local cache with Drive URL
-                const cached=CACHE['rx3_clockEvents']||[];
-                const idx=cached.findIndex(e=>e.id===eventId);
-                if(idx>=0){
-                  cached[idx].photoUrl=pr.result.url;
-                  CACHE['rx3_clockEvents']=cached;
-                  try{localStorage.setItem('rx3_clockEvents',JSON.stringify(cached));}catch(e){}
-                }
-              } else {
-                console.warn('Photo upload result:',pr);
-              }
-            })
-            .catch(err=>console.error('Photo upload failed:',err));
-          }
+          console.log('Clock event appended. Total:',r.total,'Duplicate:',r.duplicate);
+          if(photo) uploadClockPhoto();
+        } else if(r.error && r.error.indexOf('Unknown action')>=0) {
+          // GAS not yet redeployed with appendClockEvent — fall back to full write
+          console.warn('appendClockEvent not available on server, falling back to full write');
+          const allEvents=(DB.get('clockEvents')||[]).concat([serverEvent]);
+          _gasPost({action:'set',dataKey:'rx3_clockEvents',value:JSON.stringify(allEvents)})
+            .then(()=>{ console.log('Fallback write OK'); if(photo) uploadClockPhoto(); })
+            .catch(err=>console.error('Fallback write failed:',err));
         } else {
-          console.error('appendClockEvent returned error:',r.error);
-          if(!retrying){
-            console.log('Retrying in 3s...');
-            setTimeout(()=>doAppend(true),3000);
-          }
+          console.error('appendClockEvent error:',r.error);
+          if(!retrying) setTimeout(()=>doAppend(true),3000);
         }
       })
       .catch(err=>{
-        console.error('appendClockEvent network error:',err,'Retrying in 3s...');
+        console.error('appendClockEvent network error:',err);
         if(!retrying) setTimeout(()=>doAppend(true),3000);
       });
   }
+
+  function uploadClockPhoto() {
+    _gasPost({
+      action:'uploadClockPhoto',
+      eventId, empId:currentEmp.id, type:currentAction,
+      date:FD(now), time:now.toTimeString().slice(0,5),
+      data:photo
+    })
+    .then(pr=>{
+      if(pr.ok&&pr.result&&pr.result.url){
+        console.log('Clock photo saved to Drive:',pr.result.url);
+        const cached=CACHE['rx3_clockEvents']||[];
+        const idx=cached.findIndex(e=>e.id===eventId);
+        if(idx>=0){
+          cached[idx].photoUrl=pr.result.url;
+          CACHE['rx3_clockEvents']=cached;
+          try{localStorage.setItem('rx3_clockEvents',JSON.stringify(cached));}catch(e){}
+        }
+      } else {
+        console.warn('Photo upload result:',pr);
+      }
+    })
+    .catch(err=>console.error('Photo upload failed:',err));
+  }
+
   doAppend(false);
 
   showSuccess();
