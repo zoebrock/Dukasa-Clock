@@ -287,7 +287,7 @@ canvas{display:none}
 //  Never overwrite local clockEvents with stale server data.
 // ═══════════════════════════════════════════════════════
 const PROXY = '/api/gas';
-const CLOCK_VERSION = '2.1'; // bump this to force cache awareness
+const CLOCK_VERSION = '2.2'; // persistent outbox — never lose a clock event
 const CACHE = {};
 const DIRTY = {};
 
@@ -355,14 +355,16 @@ const DB = {
           Object.entries(result.data).forEach(([key, rawVal]) => {
             try {
               const serverVal = JSON.parse(rawVal);
-              // For clockEvents: keep local if it has MORE events (clock wrote since last sync)
+              // For clockEvents: clock is the writer — always keep local version
+              // Never overwrite local with server (server may lag behind outbox)
+              // Never push full array to server (race condition with other events)
               if (key === 'rx3_clockEvents') {
                 const localRaw = localStorage.getItem(key);
                 const localVal = localRaw ? JSON.parse(localRaw) : [];
+                // Use whichever has more events, but never push to server here
+                // The outbox handles server writes atomically
                 if (Array.isArray(serverVal) && Array.isArray(localVal) && localVal.length > serverVal.length) {
-                  CACHE[key] = localVal;
-                  // Push local ahead to server
-                  _gasPost({ action: 'set', dataKey: key, value: JSON.stringify(localVal) });
+                  CACHE[key] = localVal; // keep local — outbox will sync the difference
                 } else {
                   CACHE[key] = serverVal;
                   localStorage.setItem(key, rawVal);
@@ -516,15 +518,18 @@ function renderGrid(){
     const onBreak=bs&&!be;const col=ROLE_COLORS[emp.role]||"#534AB7";
     const nowT=new Date().toTimeString().slice(0,5);
     // Treat as clocked-out if: marked sick, or past rostered end with no clock-out
-    const pastEnd=todayShift&&ci&&!co&&nowT>todayShift.end;
-    const effectivelyClockedOut=co||(isSick&&ci)||pastEnd;
-    const effectiveOutTime=co?co.time:(isSick&&ci)?todayShift?.end:(pastEnd?todayShift.end:null);
     let tileCls="staff-tile";let badge="";
     if(isSick){badge=`<span class="st-badge" style="background:#FCEBEB;color:#791F1F">Sick</span>`;}
     else if(isLeave){badge=`<span class="st-badge" style="background:#FAEEDA;color:#633806">Leave</span>`;}
-    else if(effectivelyClockedOut){tileCls+=" clocked-out";badge=`<span class="st-badge badge-out">Out ${effectiveOutTime||''}</span>`;}
+    else if(co){tileCls+=" clocked-out";badge=`<span class="st-badge badge-out">Out ${co.time}</span>`;}
     else if(onBreak){tileCls+=" on-break";badge=`<span class="st-badge badge-break">On break</span>`;}
-    else if(ci){tileCls+=" clocked-in";badge=`<span class="st-badge badge-in">In ${ci.time}</span>`;}
+    else if(ci){
+      // Still clocked in — highlight urgently if significantly past shift end
+      const nowT2=new Date().toTimeString().slice(0,5);
+      const overdue=todayShift&&nowT2>todayShift.end;
+      tileCls+=" clocked-in"+(overdue?" tile-overdue":"");
+      badge=`<span class="st-badge badge-in${overdue?' badge-overdue':''}">${overdue?'Still in — needs to clock out':'In '+ ci.time}</span>`;
+    }
     else if(todayShift){tileCls+=" has-shift";badge=`<span class="st-badge badge-none">${todayShift.start}-${todayShift.end}</span>`;}
     else{badge=`<span class="st-badge badge-none">No shift</span>`;}
     const tile=document.createElement("div");tile.className=tileCls;
@@ -564,7 +569,6 @@ function renderActionScreen(){
   const be=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="break-end");
   const onBreak=bs&&!be;currentShiftId=todayShift?.id||null;
   const nowTA=new Date().toTimeString().slice(0,5);
-  const pastEnd=todayShift&&ci&&!co&&nowTA>todayShift.end;
   const sb=document.getElementById("act-shift-info");
   if(isSick)sb.innerHTML=`<span style="color:var(--red)">Marked as sick today</span>`;
   else if(isLeave)sb.innerHTML=`<span style="color:var(--amber)">On ${isLeave.type} today</span>`;
@@ -573,10 +577,11 @@ function renderActionScreen(){
   const btns=document.getElementById("act-btns");btns.innerHTML="";
   if(isSick||isLeave){btns.innerHTML=`<div class="complete-msg" style="background:${isSick?"var(--rl)":"var(--al)"};border-color:${isSick?"var(--red)":"var(--amber)"};color:${isSick?"var(--red)":"var(--amber)"}">${isSick?"Sick today":"On leave today"}</div>`;}
   else if(!ci){addBtn(btns,"clock-in","Clock in","abtn-in",!todayShift);}
-  else if(!co&&!isSick&&!pastEnd){
+  else if(!co&&!isSick){
+    // Staff must always clock out — never auto-complete a shift
     if(onBreak){addBtn(btns,"break-end","End break","abtn-brk-end",false);addBtn(btns,"clock-out","Clock out","abtn-out",false);}
     else{if(!bs)addBtn(btns,"break-start","Start break","abtn-brk",false);addBtn(btns,"clock-out","Clock out","abtn-out",false);}
-  } else {
+  } else if(co) {
     const dur=ci&&co?((MD(ci.time,co.time)-(bs&&be?MD(bs.time,be.time):todayShift?.breakMin||0))/60).toFixed(1):null;
     btns.innerHTML=`<div class="complete-msg" style="background:var(--tl);border-color:var(--teal);color:var(--teal)">Shift complete${dur?" - "+dur+"h logged":""}<br><span style="font-size:13px;opacity:.7">See you next time!</span></div>`;
   }
@@ -646,14 +651,16 @@ function setConfirmState(enabled){
 
 function checkReason(){
   if(!currentShiftId)return;const shifts=DB.get("shifts")||[];const s=shifts.find(x=>x.id===currentShiftId);if(!s)return;
-  const grace=parseInt((DB.get("settings")||{gracePeriod:5}).gracePeriod)||5;
+  const clockInGrace=parseInt((DB.get("settings")||{gracePeriod:5}).gracePeriod)||5;
+  const clockOutLateGrace=10; // 10-min grace after shift end before asking for reason
   const now=new Date();const nowMins=now.getHours()*60+now.getMinutes();
   const ref=(currentAction==="clock-in"||currentAction==="break-start")?s.start:s.end;if(!ref)return;
   const[rh,rm]=ref.split(":").map(Number);const diff=nowMins-(rh*60+rm);let msg="";
-  if(currentAction==="clock-in"&&diff<-grace)msg=`You are ${Math.abs(diff)} min early (shift starts ${s.start}).`;
-  if(currentAction==="clock-in"&&diff>grace)msg=`You are ${diff} min late (shift started ${s.start}).`;
-  if(currentAction==="clock-out"&&diff<-grace)msg=`Clocking out ${Math.abs(diff)} min early (shift ends ${s.end}).`;
-  if(currentAction==="clock-out"&&diff>grace)msg=`Clocking out ${diff} min late (shift ended ${s.end}).`;
+  if(currentAction==="clock-in"&&diff<-clockInGrace)msg=`You are ${Math.abs(diff)} min early (shift starts ${s.start}).`;
+  if(currentAction==="clock-in"&&diff>clockInGrace)msg=`You are ${diff} min late (shift started ${s.start}).`;
+  if(currentAction==="clock-out"&&diff<-clockInGrace)msg=`Clocking out ${Math.abs(diff)} min early (shift ends ${s.end}).`;
+  // Clock-out late: only ask for reason if MORE than 10 minutes past shift end
+  if(currentAction==="clock-out"&&diff>clockOutLateGrace)msg=`Clocking out ${diff} min late (shift ended ${s.end}). Please note the reason.`;
   if(msg){document.getElementById("reason-block").style.display="block";document.getElementById("reason-warn").textContent=msg;}
 }
 
@@ -732,82 +739,33 @@ function confirmClock(){
   const rb=document.getElementById("reason-block");
   if(rb.style.display!=="none"){const r=document.getElementById("reason-ta").value.trim();if(!r){document.getElementById("reason-ta").style.borderColor="var(--red)";setTimeout(()=>document.getElementById("reason-ta").style.borderColor="",2000);return;}}
 
-  // Disable confirm to prevent double-tap
   const btn=document.getElementById("confirm-btn");
-  btn.disabled=true;btn.textContent="Saving...";
+  btn.disabled=true; btn.textContent="Saving...";
 
   const now=new Date();
   const photo = capturedPhoto==="no-cam"?null:capturedPhoto;
   const reason = document.getElementById("reason-ta").value.trim()||null;
   const eventId = "ce"+Date.now()+Math.random().toString(36).slice(2,7);
 
-  // Server event — no photo (base64 too large for PropertiesService)
+  // ── Step 1: Write to local cache immediately ──────────────
+  // The event is saved locally BEFORE we attempt the server.
+  // This means the iPad always has it, regardless of connectivity.
   const serverEvent={
     id:eventId, empId:currentEmp.id, shiftId:currentShiftId,
     type:currentAction, date:FD(now), time:now.toTimeString().slice(0,5),
-    photo:null, photoUrl:null,
+    photo:null, photoUrl:null, synced:false,
     reason:reason, ts:now.toISOString()
   };
-  // Local copy keeps the base64 for on-device viewing
   const localEvent={...serverEvent, photo:photo};
 
-  // ── Update local cache immediately (don't wait for server) ──
+  // Update display cache
   const localEvents=(CACHE['rx3_clockEvents']||DB.get('clockEvents')||[]).concat([localEvent]);
   CACHE['rx3_clockEvents']=localEvents;
   try{localStorage.setItem('rx3_clockEvents',JSON.stringify(localEvents));}catch(e){}
 
-  // ── Atomic server-side append — safe for concurrent clock-ins ──
-  // GAS reads the current array, pushes this single event, writes back.
-  // No read-modify-write race condition because each device only sends its own event.
-  function doAppend(retrying) {
-    _gasPost({action:'appendClockEvent', event:serverEvent})
-      .then(r=>{
-        if(r.ok){
-          console.log('Clock event appended. Total:',r.total,'Duplicate:',r.duplicate);
-          if(photo) uploadClockPhoto();
-        } else if(r.error && r.error.indexOf('Unknown action')>=0) {
-          // GAS not yet redeployed with appendClockEvent — fall back to full write
-          console.warn('appendClockEvent not available on server, falling back to full write');
-          const allEvents=(DB.get('clockEvents')||[]).concat([serverEvent]);
-          _gasPost({action:'set',dataKey:'rx3_clockEvents',value:JSON.stringify(allEvents)})
-            .then(()=>{ console.log('Fallback write OK'); if(photo) uploadClockPhoto(); })
-            .catch(err=>console.error('Fallback write failed:',err));
-        } else {
-          console.error('appendClockEvent error:',r.error);
-          if(!retrying) setTimeout(()=>doAppend(true),3000);
-        }
-      })
-      .catch(err=>{
-        console.error('appendClockEvent network error:',err);
-        if(!retrying) setTimeout(()=>doAppend(true),3000);
-      });
-  }
-
-  function uploadClockPhoto() {
-    _gasPost({
-      action:'uploadClockPhoto',
-      eventId, empId:currentEmp.id, type:currentAction,
-      date:FD(now), time:now.toTimeString().slice(0,5),
-      data:photo
-    })
-    .then(pr=>{
-      if(pr.ok&&pr.result&&pr.result.url){
-        console.log('Clock photo saved to Drive:',pr.result.url);
-        const cached=CACHE['rx3_clockEvents']||[];
-        const idx=cached.findIndex(e=>e.id===eventId);
-        if(idx>=0){
-          cached[idx].photoUrl=pr.result.url;
-          CACHE['rx3_clockEvents']=cached;
-          try{localStorage.setItem('rx3_clockEvents',JSON.stringify(cached));}catch(e){}
-        }
-      } else {
-        console.warn('Photo upload result:',pr);
-      }
-    })
-    .catch(err=>console.error('Photo upload failed:',err));
-  }
-
-  doAppend(false);
+  // ── Step 2: Add to persistent outbox ─────────────────────
+  // The outbox worker will keep retrying until the server confirms.
+  outbox_add(serverEvent, photo);
 
   showSuccess();
 }
@@ -882,8 +840,126 @@ DB.preload(ALL_KEYS, function(){
 // No 30s server refresh for clockEvents — the clock owns writes,
 // the Manager Portal owns reads. Refreshing would risk overwriting local events.
 // We only refresh shifts (roster data) every 5 minutes to pick up roster changes.
-// Smart sync — ping every 10s, full refresh only when data changed
-// Clock NEVER re-reads clockEvents from server (it is the authoritative writer)
+// ═══════════════════════════════════════════════════════════
+//  PERSISTENT OUTBOX — guarantees every clock event reaches GAS
+//
+//  How it works:
+//  1. Every clock event is saved to localStorage outbox immediately
+//  2. A worker runs every 8 seconds and flushes all unsent events
+//  3. Only after GAS confirms receipt is the event marked as synced
+//  4. If the iPad goes offline / app is closed / network blips:
+//     — events stay in the outbox
+//     — the worker picks them up and retries next time online
+//  5. Deduplication in GAS prevents double-sends
+//  6. The outbox also on startup to catch anything from previous sessions
+// ═══════════════════════════════════════════════════════════
+
+const OUTBOX_KEY = 'ck_outbox';
+
+function outbox_get() {
+  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY)||'[]'); } catch(e) { return []; }
+}
+
+function outbox_save(items) {
+  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(items)); } catch(e) {}
+}
+
+function outbox_add(serverEvent, photo) {
+  const items = outbox_get();
+  // Don't add duplicates
+  if (!items.find(i => i.event.id === serverEvent.id)) {
+    items.push({ event: serverEvent, photo: photo||null, addedAt: Date.now() });
+    outbox_save(items);
+    console.log('[OUTBOX] Added event', serverEvent.id, '— outbox size:', items.length);
+  }
+  outbox_flush(); // Try immediately
+}
+
+let _outboxFlushing = false;
+
+async function outbox_flush() {
+  if (_outboxFlushing) return;
+  const items = outbox_get();
+  const unsent = items.filter(i => !i.synced);
+  if (!unsent.length) return;
+
+  _outboxFlushing = true;
+  console.log('[OUTBOX] Flushing', unsent.length, 'unsent event(s)...');
+
+  for (const item of unsent) {
+    try {
+      const r = await _gasPost({ action: 'appendClockEvent', event: item.event });
+      if (r.ok || r.duplicate) {
+        // Mark as synced in outbox
+        const current = outbox_get();
+        const idx = current.findIndex(i => i.event.id === item.event.id);
+        if (idx >= 0) { current[idx].synced = true; current[idx].syncedAt = Date.now(); }
+        outbox_save(current);
+
+        // Mark synced in local clockEvents cache too
+        const cached = CACHE['rx3_clockEvents'] || [];
+        const ci = cached.findIndex(e => e.id === item.event.id);
+        if (ci >= 0) { cached[ci].synced = true; CACHE['rx3_clockEvents'] = cached; }
+
+        console.log('[OUTBOX] Event', item.event.id, 'confirmed on server. Total on server:', r.total);
+
+        // Upload photo to Drive if present (non-blocking, best-effort)
+        if (item.photo) {
+          _gasPost({
+            action: 'uploadClockPhoto',
+            eventId: item.event.id,
+            empId: item.event.empId,
+            type: item.event.type,
+            date: item.event.date,
+            time: item.event.time,
+            data: item.photo
+          })
+          .then(pr => {
+            if (pr.ok && pr.result && pr.result.url) {
+              console.log('[OUTBOX] Photo uploaded to Drive:', pr.result.url);
+              // Patch Drive URL into local cache
+              const ce = CACHE['rx3_clockEvents'] || [];
+              const pi = ce.findIndex(e => e.id === item.event.id);
+              if (pi >= 0) {
+                ce[pi].photoUrl = pr.result.url;
+                CACHE['rx3_clockEvents'] = ce;
+                try { localStorage.setItem('rx3_clockEvents', JSON.stringify(ce)); } catch(e) {}
+              }
+              // Remove from outbox now that photo is also done
+              const ob = outbox_get().filter(i => i.event.id !== item.event.id);
+              outbox_save(ob);
+            }
+          })
+          .catch(err => console.warn('[OUTBOX] Photo upload failed (will not retry):', err));
+        } else {
+          // No photo — remove from outbox immediately
+          const ob = outbox_get().filter(i => i.event.id !== item.event.id);
+          outbox_save(ob);
+        }
+
+      } else {
+        console.warn('[OUTBOX] appendClockEvent returned error for', item.event.id, ':', r.error, '— will retry');
+      }
+    } catch(err) {
+      console.warn('[OUTBOX] Network error sending', item.event.id, ':', err.message, '— will retry');
+    }
+  }
+
+  // Clean up old synced entries (older than 24h) to prevent outbox bloat
+  const cleaned = outbox_get().filter(i => !i.synced || (Date.now() - (i.syncedAt||0)) < 86400000);
+  outbox_save(cleaned);
+
+  _outboxFlushing = false;
+}
+
+// ── Flush outbox on startup (catches any events from previous sessions) ──
+outbox_flush();
+
+// ── Flush outbox every 8 seconds ─────────────────────────────────────────
+setInterval(outbox_flush, 8000);
+
+// ── Smart sync — ping GAS every 10s, refresh roster data when changed ────
+// The clock NEVER pulls clockEvents from server (it IS the source of truth)
 let _ckLastModified='0';
 setInterval(async()=>{
   try{
@@ -891,7 +967,6 @@ setInterval(async()=>{
     const ts=r.ok?r.lastModified:'0';
     if(ts!==_ckLastModified){
       _ckLastModified=ts;
-      // Only refresh shifts/staff/settings — never clockEvents
       await new Promise(resolve=>DB.refresh(['shifts','staff','settings','leaveRequests','sickDays'],resolve));
       if(document.getElementById('screen-home').classList.contains('active')) renderGrid();
     }
