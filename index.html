@@ -513,9 +513,9 @@ function renderGrid(){
     const isLeave=leaveReqs.find(l=>l.empId===emp.id&&l.from<=today&&l.to>=today);
     const ci=ce.find(e=>e.empId===emp.id&&e.date===today&&e.type==="clock-in");
     const co=ce.find(e=>e.empId===emp.id&&e.date===today&&e.type==="clock-out");
-    const bs=ce.find(e=>e.empId===emp.id&&e.date===today&&e.type==="break-start");
-    const be=ce.find(e=>e.empId===emp.id&&e.date===today&&e.type==="break-end");
-    const onBreak=bs&&!be;const col=ROLE_COLORS[emp.role]||"#534AB7";
+    const empCe=ce.filter(e=>e.empId===emp.id&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
+    const {onBreak:onBreak,usedMins:usedBrk}=calcBreakState(empCe);
+    const col=ROLE_COLORS[emp.role]||"#534AB7";
     const nowT=new Date().toTimeString().slice(0,5);
     // Treat as clocked-out if: marked sick, or past rostered end with no clock-out
     let tileCls="staff-tile";let badge="";
@@ -565,14 +565,20 @@ function renderActionScreen(){
   const isLeave=leaveReqs.find(l=>l.empId===currentEmp.id&&l.from<=today&&l.to>=today);
   const ci=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="clock-in");
   const co=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="clock-out");
-  const bs=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="break-start");
-  const be=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="break-end");
-  const onBreak=bs&&!be;currentShiftId=todayShift?.id||null;
+  const empCe2=ce.filter(e=>e.empId===currentEmp.id&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
+  const {onBreak:onBreak,sessions:breakSessions2,usedMins:usedBreakMins2,activeBreak:activeBreak2}=calcBreakState(empCe2);
+  currentShiftId=todayShift?.id||null;
   const nowTA=new Date().toTimeString().slice(0,5);
   const sb=document.getElementById("act-shift-info");
   if(isSick)sb.innerHTML=`<span style="color:var(--red)">Marked as sick today</span>`;
   else if(isLeave)sb.innerHTML=`<span style="color:var(--amber)">On ${isLeave.type} today</span>`;
-  else if(todayShift)sb.innerHTML=`<strong>${todayShift.start} - ${todayShift.end}</strong><span style="color:var(--t3);margin-left:8px">${todayShift.breakMin||30}min break</span>${ci?`<br><span style="color:var(--teal);font-size:12px">Clocked in ${ci.time}</span>`:""}${co?`<br><span style="color:var(--green);font-size:12px">Clocked out ${co.time}</span>`:""}`;
+  else if(todayShift){
+    const grossH=(MD(todayShift.start,todayShift.end))/60;
+    const totalBrk=grossH>8?50:grossH>=8?40:30;
+    const remBrk=Math.max(0,totalBrk-usedBreakMins2);
+    const brkHistory=breakSessions2.filter(s=>s.end).map(s=>`${s.start.time}–${s.end.time}`).join(', ');
+    const brkLine=onBreak?`Break started ${activeBreak2?.start?.time||''} · <strong style="color:var(--amber)">${remBrk} min remaining</strong>`:brkHistory?`Breaks: ${brkHistory} · <strong style="color:${remBrk>0?'var(--teal)`:'var(--t3)'}">${remBrk>0?remBrk+' min remaining':'fully used'}</strong>`:` ${totalBrk}min break available`;
+    sb.innerHTML=`<strong>${todayShift.start} - ${todayShift.end}</strong><br><span style="font-size:12px;color:var(--t2)">${brkLine}</span>${ci?`<br><span style="color:var(--teal);font-size:12px">Clocked in ${ci.time}</span>`:""}${co?`<br><span style="color:var(--green);font-size:12px">Clocked out ${co.time}</span>`:""}`;  }
   else sb.innerHTML=`<span style="color:var(--t3)">No published shift today</span>`;
   const btns=document.getElementById("act-btns");btns.innerHTML="";
   if(isSick||isLeave){btns.innerHTML=`<div class="complete-msg" style="background:${isSick?"var(--rl)":"var(--al)"};border-color:${isSick?"var(--red)":"var(--amber)"};color:${isSick?"var(--red)":"var(--amber)"}">${isSick?"Sick today":"On leave today"}</div>`;}
@@ -580,7 +586,13 @@ function renderActionScreen(){
   else if(!co&&!isSick){
     // Staff must always clock out — never auto-complete a shift
     if(onBreak){addBtn(btns,"break-end","End break","abtn-brk-end",false);addBtn(btns,"clock-out","Clock out","abtn-out",false);}
-    else{if(!bs)addBtn(btns,"break-start","Start break","abtn-brk",false);addBtn(btns,"clock-out","Clock out","abtn-out",false);}
+    else{
+      const grossH2=(MD(todayShift.start,todayShift.end))/60;
+      const totalBrk2=grossH2>8?50:grossH2>=8?40:30;
+      const remBrk2=Math.max(0,totalBrk2-usedBreakMins2);
+      if(remBrk2>0) addBtn(btns,"break-start","Start break","abtn-brk",false);
+      addBtn(btns,"clock-out","Clock out","abtn-out",false);
+    }
   } else if(co) {
     const dur=ci&&co?((MD(ci.time,co.time)-(bs&&be?MD(bs.time,be.time):todayShift?.breakMin||0))/60).toFixed(1):null;
     btns.innerHTML=`<div class="complete-msg" style="background:var(--tl);border-color:var(--teal);color:var(--teal)">Shift complete${dur?" - "+dur+"h logged":""}<br><span style="font-size:13px;opacity:.7">See you next time!</span></div>`;
