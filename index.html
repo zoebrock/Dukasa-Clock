@@ -542,11 +542,10 @@ function renderGrid(){
     else if(co){tileCls+=" clocked-out";badge=`<span class="st-badge badge-out">Out ${co.time}</span>`;}
     else if(onBreak){tileCls+=" on-break";badge=`<span class="st-badge badge-break">On break</span>`;}
     else if(ci){
-      // Still clocked in — highlight urgently if significantly past shift end
       const nowT2=new Date().toTimeString().slice(0,5);
       const overdue=todayShift&&nowT2>todayShift.end;
       tileCls+=" clocked-in"+(overdue?" tile-overdue":"");
-      badge=`<span class="st-badge badge-in${overdue?' badge-overdue':''}">${overdue?'Still in — needs to clock out':'In '+ ci.time}</span>`;
+      badge=`<span class="st-badge badge-in${overdue?" badge-overdue":""}" title="Clocked in at ${ci.time}${ci.manual?" (manual entry)":""}">${overdue?"Still in":"In"} ${ci.time}${ci.manual?'<sup style="font-size:8px"> M</sup>':''}</span>`;
     }
     else if(todayShift){tileCls+=" has-shift";badge=`<span class="st-badge badge-none">${todayShift.start}-${todayShift.end}</span>`;}
     else{badge=`<span class="st-badge badge-none">No shift</span>`;}
