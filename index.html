@@ -363,24 +363,9 @@ const DB = {
           Object.entries(result.data).forEach(([key, rawVal]) => {
             try {
               const serverVal = JSON.parse(rawVal);
-              // For clockEvents: clock is the writer — always keep local version
-              // Never overwrite local with server (server may lag behind outbox)
-              // Never push full array to server (race condition with other events)
-              if (key === 'rx3_clockEvents') {
-                const localRaw = localStorage.getItem(key);
-                const localVal = localRaw ? JSON.parse(localRaw) : [];
-                // Use whichever has more events, but never push to server here
-                // The outbox handles server writes atomically
-                if (Array.isArray(serverVal) && Array.isArray(localVal) && localVal.length > serverVal.length) {
-                  CACHE[key] = localVal; // keep local — outbox will sync the difference
-                } else {
-                  CACHE[key] = serverVal;
-                  localStorage.setItem(key, rawVal);
-                }
-              } else {
-                CACHE[key] = serverVal;
-                localStorage.setItem(key, rawVal);
-              }
+              // Always trust server — server is authoritative on refresh
+              CACHE[key] = serverVal;
+              localStorage.setItem(key, rawVal);
             } catch(e) { CACHE[key] = null; }
           });
           // Fallback: keys missing from server → use localStorage
@@ -1019,6 +1004,39 @@ setInterval(async()=>{
   }catch(e){ /* silent */ }
 },10000);
 
+
+// ── CLOCK REFRESH BUTTON ────────────────────────────────────
+async function clockRefresh() {
+  const btn  = document.getElementById('ck-refresh-btn');
+  const icon = document.getElementById('ck-refresh-icon');
+  const ind  = document.getElementById('sync-indicator');
+  if (btn)  btn.disabled = true;
+  if (icon) icon.style.transform = 'rotate(720deg)';
+  if (ind)  ind.textContent = 'Refreshing...';
+  _setSyncIndicator('loading');
+  try {
+    const r = await _gasGet('getAll');
+    if (r.ok && r.data) {
+      // Write ALL server data to cache — server is authoritative
+      Object.entries(r.data).forEach(([key, rawVal]) => {
+        try { CACHE[key] = JSON.parse(rawVal); localStorage.setItem(key, rawVal); }
+        catch(e) { CACHE[key] = null; }
+      });
+    }
+    renderGrid();
+    _setSyncIndicator('saved');
+    if (ind) {
+      ind.textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      setTimeout(()=>{ if(ind) ind.textContent=''; }, 4000);
+    }
+  } catch(e) {
+    console.error('Refresh error:', e);
+    _setSyncIndicator('error');
+    if (ind) { ind.textContent = 'Refresh failed'; setTimeout(()=>{ if(ind) ind.textContent=''; }, 3000); }
+  }
+  if (btn)  btn.disabled = false;
+  setTimeout(()=>{ if(icon) icon.style.transform = 'rotate(0deg)'; }, 500);
+}
 
 </script>
 </body>
