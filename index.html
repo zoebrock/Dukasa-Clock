@@ -497,6 +497,24 @@ function handlePinOverlayClick(e){
 
 function startClock(){function tick(){const n=new Date();const cl=document.getElementById("home-clock");const dl=document.getElementById("home-date");if(cl)cl.textContent=n.toLocaleTimeString("en-AU");if(dl)dl.textContent=n.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long",year:"numeric"});}tick();setInterval(tick,1000);}
 
+// ── BREAK STATE HELPER ─────────────────────────────────────
+function calcBreakState(sortedEvents){
+  const sessions=[];let pending=null;
+  for(const e of sortedEvents){
+    if(e.type==='break-start'){pending=e;}
+    else if(e.type==='break-end'&&pending){sessions.push({start:pending,end:e});pending=null;}
+  }
+  if(pending) sessions.push({start:pending,end:null});
+  const activeBreak=sessions.find(s=>!s.end)||null;
+  const onBreak=!!activeBreak;
+  const usedMins=sessions.filter(s=>s.end).reduce((sum,s)=>{
+    const sMs=s.start.ts?new Date(s.start.ts).getTime():0;
+    const eMs=s.end.ts?new Date(s.end.ts).getTime():0;
+    return sum+(eMs>sMs?Math.floor((eMs-sMs)/60000):0);
+  },0);
+  return{onBreak,sessions,usedMins,activeBreak};
+}
+
 function renderGrid(){
   const all=[...(DB.get("staff")||[])].sort((a,b)=>a.first.localeCompare(b.first)||a.last.localeCompare(b.last));
   const q=(document.getElementById("staff-search").value||"").toLowerCase().trim();
@@ -576,8 +594,17 @@ function renderActionScreen(){
     const grossH=(MD(todayShift.start,todayShift.end))/60;
     const totalBrk=grossH>8?50:grossH>=8?40:30;
     const remBrk=Math.max(0,totalBrk-usedBreakMins2);
-    const brkHistory=breakSessions2.filter(s=>s.end).map(s=>`${s.start.time}–${s.end.time}`).join(', ');
-    const brkLine=onBreak?`Break started ${activeBreak2?.start?.time||''} · <strong style="color:var(--amber)">${remBrk} min remaining</strong>`:brkHistory?`Breaks: ${brkHistory} · <strong style="color:${remBrk>0?'var(--teal)`:'var(--t3)'}">${remBrk>0?remBrk+' min remaining':'fully used'}</strong>`:` ${totalBrk}min break available`;
+    const brkHistory=breakSessions2.filter(s=>s.end).map(s=>s.start.time+'–'+s.end.time).join(', ');
+    let brkLine;
+    if(onBreak){
+      brkLine='Break started '+(activeBreak2&&activeBreak2.start?activeBreak2.start.time:'')+' &middot; <strong style="color:var(--amber)">'+remBrk+' min remaining</strong>';
+    } else if(brkHistory){
+      const remColor=remBrk>0?'var(--teal)':'var(--t3)';
+      const remText=remBrk>0?remBrk+' min remaining':'fully used';
+      brkLine='Breaks: '+brkHistory+' &middot; <strong style="color:'+remColor+'">'+remText+'</strong>';
+    } else {
+      brkLine=totalBrk+'min break available';
+    }
     sb.innerHTML=`<strong>${todayShift.start} - ${todayShift.end}</strong><br><span style="font-size:12px;color:var(--t2)">${brkLine}</span>${ci?`<br><span style="color:var(--teal);font-size:12px">Clocked in ${ci.time}</span>`:""}${co?`<br><span style="color:var(--green);font-size:12px">Clocked out ${co.time}</span>`:""}`;  }
   else sb.innerHTML=`<span style="color:var(--t3)">No published shift today</span>`;
   const btns=document.getElementById("act-btns");btns.innerHTML="";
