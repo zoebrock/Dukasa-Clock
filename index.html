@@ -355,6 +355,9 @@ const DB = {
   },
 
   // Batch preload — fetches all rx3_ keys in one call
+  // CRITICAL: rx3_clockEvents is NEVER overwritten from server during preload.
+  // The clock iPad is the authoritative writer. The server copy may be incomplete
+  // (events in the outbox not yet confirmed). We merge server+local instead.
   preload(keys, callback) {
     _setSyncIndicator('loading');
     _gasGet('getAll')
@@ -362,10 +365,21 @@ const DB = {
         if (result.ok && result.data) {
           Object.entries(result.data).forEach(([key, rawVal]) => {
             try {
-              const serverVal = JSON.parse(rawVal);
-              // Always trust server — server is authoritative on refresh
-              CACHE[key] = serverVal;
-              localStorage.setItem(key, rawVal);
+              if (key === 'rx3_clockEvents') {
+                // Special merge: union of server events + local events, deduped by id.
+                // Local events win (they may contain events not yet confirmed by server).
+                const serverEvts = JSON.parse(rawVal || '[]');
+                const localRaw   = localStorage.getItem(key);
+                const localEvts  = localRaw ? JSON.parse(localRaw) : [];
+                const merged     = _mergeClockEvents(serverEvts, localEvts);
+                CACHE[key] = merged;
+                localStorage.setItem(key, JSON.stringify(merged));
+                console.log('[PRELOAD] clockEvents: server='+serverEvts.length+' local='+localEvts.length+' merged='+merged.length);
+              } else {
+                // All other keys: server is authoritative
+                CACHE[key] = JSON.parse(rawVal);
+                localStorage.setItem(key, rawVal);
+              }
             } catch(e) { CACHE[key] = null; }
           });
           // Fallback: keys missing from server → use localStorage
@@ -920,6 +934,9 @@ async function outbox_flush() {
   for (const item of unsent) {
     try {
       const r = await _gasPost({ action: 'appendClockEvent', event: item.event });
+      // A 504 timeout means the proxy timed out but GAS may have succeeded.
+      // Treat it as "retry" (not success, not permanent failure).
+      // A true server error (r.ok===false with real error message) also retries.
       if (r.ok || r.duplicate) {
         // Mark as synced in outbox
         const current = outbox_get();
@@ -1006,6 +1023,18 @@ setInterval(async()=>{
 
 
 // ── CLOCK REFRESH BUTTON ────────────────────────────────────
+// ── Merge helper: union of two clockEvent arrays, deduped by id ──────────────
+// localEvts "win" — if same id exists in both, local copy is kept
+// (local may have a photo, unsynced flag etc that server doesn't have yet).
+function _mergeClockEvents(serverEvts, localEvts) {
+  const merged = {};
+  // Add server events first
+  (serverEvts||[]).forEach(e => { if(e&&e.id) merged[e.id] = e; });
+  // Local events overwrite server (local is more complete / more recent)
+  (localEvts||[]).forEach(e => { if(e&&e.id) merged[e.id] = e; });
+  return Object.values(merged).sort((a,b)=>((a.date||'')+(a.time||'')).localeCompare((b.date||'')+(b.time||'')));
+}
+
 async function clockRefresh() {
   const btn  = document.getElementById('ck-refresh-btn');
   const icon = document.getElementById('ck-refresh-icon');
@@ -1014,13 +1043,30 @@ async function clockRefresh() {
   if (icon) icon.style.transform = 'rotate(720deg)';
   if (ind)  ind.textContent = 'Refreshing...';
   _setSyncIndicator('loading');
+
+  // First flush the outbox — make sure everything we have locally is on the server
+  await outbox_flush();
+
   try {
     const r = await _gasGet('getAll');
     if (r.ok && r.data) {
-      // Write ALL server data to cache — server is authoritative
       Object.entries(r.data).forEach(([key, rawVal]) => {
-        try { CACHE[key] = JSON.parse(rawVal); localStorage.setItem(key, rawVal); }
-        catch(e) { CACHE[key] = null; }
+        try {
+          if (key === 'rx3_clockEvents') {
+            // NEVER blindly overwrite local clock events with server data.
+            // Merge: keep everything from both sides, deduped by id, local wins.
+            const serverEvts = JSON.parse(rawVal || '[]');
+            const localEvts  = CACHE[key] || [];
+            const merged     = _mergeClockEvents(serverEvts, localEvts);
+            CACHE[key] = merged;
+            localStorage.setItem(key, JSON.stringify(merged));
+            console.log('[REFRESH] clockEvents: server='+serverEvts.length+' local='+localEvts.length+' merged='+merged.length);
+          } else {
+            // All other keys: server is authoritative
+            CACHE[key] = JSON.parse(rawVal);
+            localStorage.setItem(key, rawVal);
+          }
+        } catch(e) { /* keep existing cache value */ }
       });
     }
     renderGrid();
