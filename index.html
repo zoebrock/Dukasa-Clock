@@ -361,13 +361,15 @@ const DB = {
   preload(keys, callback) {
     _setSyncIndicator('loading');
     Promise.all([
-      supabase.from('staff').select('*'),
-      supabase.from('shifts').select('*'),
-      supabase.from('clock_events').select('*'),
-      supabase.from('leave_requests').select('*'),
-      supabase.from('sick_days').select('*'),
-      supabase.from('ot_requests').select('*'),
-      supabase.from('settings').select('*')
+Promise.all([
+  supabaseClient2.from('staff').select('*'),
+  supabaseClient2.from('shifts').select('*'),
+  supabaseClient2.from('clock_events').select('*'),
+  supabaseClient2.from('leave_requests').select('*'),
+  supabaseClient2.from('sick_days').select('*'),
+  supabaseClient2.from('ot_requests').select('*'),
+  supabaseClient2.from('settings').select('*')
+])
     ]).then(([staff, shifts, ce, lr, sd, ot, settings]) => {
       CACHE['rx3_staff'] = staff.data || [];
       CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
