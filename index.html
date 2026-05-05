@@ -879,6 +879,9 @@ document.body.insertAdjacentHTML('beforeend',
 DB.preload(ALL_KEYS, function(){
   const loader=document.getElementById('dk-loader');
   if(loader) loader.remove();
+  console.log('Staff loaded:', (DB.get('staff')||[]).length);
+  console.log('Shifts loaded:', (DB.get('shifts')||[]).length);
+  console.log('First staff member:', JSON.stringify((DB.get('staff')||[])[0]));
   seedIfEmpty();
   // Auto-purge orphaned shifts so ? names never appear on clock grid
   (function(){
