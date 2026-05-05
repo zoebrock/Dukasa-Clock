@@ -162,6 +162,7 @@ canvas{display:none}
   document.head.appendChild(ml);
 })();
 </script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
@@ -285,6 +286,10 @@ canvas{display:none}
 <canvas id="ck-canvas" width="800" height="600" style="display:none"></canvas>
 
 <script>
+const supabase = window.supabase.createClient(
+  'https://jfowikvmnqlebranlggf.supabase.co',
+  'sb_publishable_-x_b0RnXfUjoKML_cRYvjA_r2udt8PQ'
+);
 // ═══════════════════════════════════════════════════════
 //  SYNC DB — reads/writes Google Sheets when in Apps Script
 //  Falls back to localStorage for local development
@@ -345,7 +350,6 @@ const DB = {
       .catch(err => {
         console.error('DB.set failed for', key, err);
         _setSyncIndicator('error');
-        // Retry once after 3 seconds
         setTimeout(() => {
           _gasPost({ action: 'set', dataKey: key, value: json })
             .then(() => { delete DIRTY[key]; _setSyncIndicator('saved'); })
@@ -354,59 +358,80 @@ const DB = {
       });
   },
 
-  // Batch preload — fetches all rx3_ keys in one call
   preload(keys, callback) {
     _setSyncIndicator('loading');
-    _gasGet('getAll')
-      .then(result => {
-        if (result.ok && result.data) {
-          Object.entries(result.data).forEach(([key, rawVal]) => {
-            try {
-              const serverVal = JSON.parse(rawVal);
-              // Always trust server — server is authoritative on refresh
-              CACHE[key] = serverVal;
-              localStorage.setItem(key, rawVal);
-            } catch(e) { CACHE[key] = null; }
-          });
-          // Fallback: keys missing from server → use localStorage
-          keys.forEach(k => {
-            const key = 'rx3_' + k;
-            if (CACHE[key] === undefined) {
-              const local = localStorage.getItem(key);
-              try { CACHE[key] = local ? JSON.parse(local) : null; } catch(e) { CACHE[key] = null; }
-            }
-          });
-        } else {
-          keys.forEach(k => { const key='rx3_'+k; const local=localStorage.getItem(key); try{CACHE[key]=local?JSON.parse(local):null;}catch(e){CACHE[key]=null;} });
-        }
-        _setSyncIndicator('idle');
-        if (callback) callback();
-      })
-      .catch(err => {
-        console.error('Preload failed:', err);
-        keys.forEach(k => { const key='rx3_'+k; const local=localStorage.getItem(key); try{CACHE[key]=local?JSON.parse(local):null;}catch(e){CACHE[key]=null;} });
-        _setSyncIndicator('error');
-        if (callback) callback();
-      });
+    Promise.all([
+      supabase.from('staff').select('*'),
+      supabase.from('shifts').select('*'),
+      supabase.from('clock_events').select('*'),
+      supabase.from('leave_requests').select('*'),
+      supabase.from('sick_days').select('*'),
+      supabase.from('ot_requests').select('*'),
+      supabase.from('settings').select('*')
+    ]).then(([staff, shifts, ce, lr, sd, ot, settings]) => {
+      CACHE['rx3_staff'] = staff.data || [];
+      CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
+        ...s, empId: s.emp_id, breakMin: s.break_min,
+        isOT: s.is_ot, otId: s.ot_id
+      }));
+      CACHE['rx3_clockEvents'] = (ce.data || []).map(e => ({
+        ...e, empId: e.emp_id, ts: e.timestamp
+      }));
+      CACHE['rx3_leaveRequests'] = (lr.data || []).map(l => ({
+        ...l, empId: l.emp_id, from: l.from_date, to: l.to_date
+      }));
+      CACHE['rx3_sickDays'] = (sd.data || []).map(s => ({
+        ...s, empId: s.emp_id
+      }));
+      CACHE['rx3_otRequests'] = (ot.data || []).map(o => ({
+        ...o, empId: o.emp_id
+      }));
+      CACHE['rx3_settings'] = settings.data?.[0]?.value || {};
+      _setSyncIndicator('idle');
+      if (callback) callback();
+    }).catch(err => {
+      console.error('Preload failed:', err);
+      _setSyncIndicator('error');
+      if (callback) callback();
+    });
   },
 
-  // Refresh specific keys — NEVER refreshes clockEvents (clock is authoritative writer)
   refresh(keys, callback) {
     const safeKeys = keys.filter(k => k !== 'clockEvents');
-    if (!safeKeys.length) { if(callback) callback(); return; }
-    _gasGet('getAll')
-      .then(result => {
-        if (result.ok && result.data) {
-          safeKeys.forEach(k => {
-            const key = 'rx3_' + k;
-            if (result.data[key] !== undefined) {
-              try { CACHE[key] = JSON.parse(result.data[key]); localStorage.setItem(key, result.data[key]); } catch(e) {}
-            }
-          });
+    if (!safeKeys.length) { if (callback) callback(); return; }
+    const tableMap = {
+      staff: 'staff',
+      shifts: 'shifts',
+      leaveRequests: 'leave_requests',
+      sickDays: 'sick_days',
+      otRequests: 'ot_requests',
+      settings: 'settings'
+    };
+    Promise.all(safeKeys.map(k => {
+      const table = tableMap[k];
+      return table ? supabase.from(table).select('*') : Promise.resolve({ data: [] });
+    })).then(results => {
+      safeKeys.forEach((k, i) => {
+        const data = results[i].data || [];
+        if (k === 'shifts') {
+          CACHE['rx3_shifts'] = data.map(s => ({
+            ...s, empId: s.emp_id, breakMin: s.break_min,
+            isOT: s.is_ot, otId: s.ot_id
+          }));
+        } else if (k === 'leaveRequests') {
+          CACHE['rx3_leaveRequests'] = data.map(l => ({
+            ...l, empId: l.emp_id, from: l.from_date, to: l.to_date
+          }));
+        } else if (k === 'sickDays') {
+          CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id }));
+        } else if (k === 'settings') {
+          CACHE['rx3_settings'] = data[0]?.value || {};
+        } else {
+          CACHE['rx3_' + k] = data;
         }
-        if (callback) callback();
-      })
-      .catch(() => { if(callback) callback(); });
+      });
+      if (callback) callback();
+    }).catch(() => { if (callback) callback(); });
   }
 };
 
@@ -991,18 +1016,14 @@ setInterval(outbox_flush, 8000);
 
 // ── Smart sync — ping GAS every 10s, refresh roster data when changed ────
 // The clock NEVER pulls clockEvents from server (it IS the source of truth)
-let _ckLastModified='0';
-setInterval(async()=>{
-  try{
-    const r=await _gasGet('ping');
-    const ts=r.ok?r.lastModified:'0';
-    if(ts!==_ckLastModified){
-      _ckLastModified=ts;
-      await new Promise(resolve=>DB.refresh(['shifts','staff','settings','leaveRequests','sickDays'],resolve));
-      if(document.getElementById('screen-home').classList.contains('active')) renderGrid();
-    }
-  }catch(e){ /* silent */ }
-},10000);
+setInterval(async () => {
+  try {
+    await new Promise(resolve => DB.refresh(
+      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'], resolve
+    ));
+    if (document.getElementById('screen-home').classList.contains('active')) renderGrid();
+  } catch(e) { /* silent */ }
+}, 30000);
 
 
 // ── CLOCK REFRESH BUTTON ────────────────────────────────────
@@ -1012,22 +1033,15 @@ async function clockRefresh() {
   const ind  = document.getElementById('sync-indicator');
   if (btn)  btn.disabled = true;
   if (icon) icon.style.transform = 'rotate(720deg)';
-  if (ind)  ind.textContent = 'Refreshing...';
   _setSyncIndicator('loading');
   try {
-    const r = await _gasGet('getAll');
-    if (r.ok && r.data) {
-      // Write ALL server data to cache — server is authoritative
-      Object.entries(r.data).forEach(([key, rawVal]) => {
-        try { CACHE[key] = JSON.parse(rawVal); localStorage.setItem(key, rawVal); }
-        catch(e) { CACHE[key] = null; }
-      });
-    }
+    await new Promise(resolve => DB.preload(ALL_KEYS, resolve));
     renderGrid();
     _setSyncIndicator('saved');
     if (ind) {
-      ind.textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-      setTimeout(()=>{ if(ind) ind.textContent=''; }, 4000);
+      ind.textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU',
+        {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      setTimeout(() => { if(ind) ind.textContent = ''; }, 4000);
     }
   } catch(e) {
     console.error('Refresh error:', e);
@@ -1035,7 +1049,7 @@ async function clockRefresh() {
     if (ind) { ind.textContent = 'Refresh failed'; setTimeout(()=>{ if(ind) ind.textContent=''; }, 3000); }
   }
   if (btn)  btn.disabled = false;
-  setTimeout(()=>{ if(icon) icon.style.transform = 'rotate(0deg)'; }, 500);
+  setTimeout(() => { if(icon) icon.style.transform = 'rotate(0deg)'; }, 500);
 }
 
 </script>
