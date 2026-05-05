@@ -358,45 +358,79 @@ const DB = {
       });
   },
 
-  preload(keys, callback) {
-    _setSyncIndicator('loading');
-    Promise.all([
-Promise.all([
-  supabaseClient2.from('staff').select('*'),
-  supabaseClient2.from('shifts').select('*'),
-  supabaseClient2.from('clock_events').select('*'),
-  supabaseClient2.from('leave_requests').select('*'),
-  supabaseClient2.from('sick_days').select('*'),
-  supabaseClient2.from('ot_requests').select('*'),
-  supabaseClient2.from('settings').select('*')
-])
-    ]).then(([staff, shifts, ce, lr, sd, ot, settings]) => {
-      CACHE['rx3_staff'] = staff.data || [];
-      CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
-        ...s, empId: s.emp_id, breakMin: s.break_min,
-        isOT: s.is_ot, otId: s.ot_id
-      }));
-      CACHE['rx3_clockEvents'] = (ce.data || []).map(e => ({
-        ...e, empId: e.emp_id, ts: e.timestamp
-      }));
-      CACHE['rx3_leaveRequests'] = (lr.data || []).map(l => ({
-        ...l, empId: l.emp_id, from: l.from_date, to: l.to_date
-      }));
-      CACHE['rx3_sickDays'] = (sd.data || []).map(s => ({
-        ...s, empId: s.emp_id
-      }));
-      CACHE['rx3_otRequests'] = (ot.data || []).map(o => ({
-        ...o, empId: o.emp_id
-      }));
-      CACHE['rx3_settings'] = settings.data?.[0]?.value || {};
-      _setSyncIndicator('idle');
-      if (callback) callback();
-    }).catch(err => {
-      console.error('Preload failed:', err);
-      _setSyncIndicator('error');
-      if (callback) callback();
-    });
-  },
+preload(keys, callback) {
+  _setSyncIndicator('loading');
+
+  Promise.all([
+    supabaseClient2.from('staff').select('*'),
+    supabaseClient2.from('shifts').select('*'),
+    supabaseClient2.from('clock_events').select('*'),
+    supabaseClient2.from('leave_requests').select('*'),
+    supabaseClient2.from('sick_days').select('*'),
+    supabaseClient2.from('ot_requests').select('*'),
+    supabaseClient2.from('settings').select('*')
+  ]).then(([staff, shifts, clockEvents, leaveRequests, sickDays, otRequests, settings]) => {
+    if (staff.error) console.error('Staff load error:', staff.error);
+    if (shifts.error) console.error('Shifts load error:', shifts.error);
+
+    CACHE['rx3_staff'] = (staff.data || []).map(r => ({
+      ...r,
+      availNotes: r.avail_notes,
+      contractStart: r.contract_start,
+      contractEnd: r.contract_end,
+      contractBreak: r.contract_break,
+      contractDays: r.contract_days,
+      contractPerDay: r.contract_per_day,
+      contractedHrsPerWeek: r.contracted_hrs_per_week,
+      autoShift: r.auto_shift
+    }));
+
+    CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
+      ...s,
+      empId: s.emp_id,
+      breakMin: s.break_min,
+      paidBreakMin: s.paid_break_min,
+      isOT: s.is_ot,
+      otId: s.ot_id,
+      otOriginalStart: s.ot_original_start,
+      otOriginalEnd: s.ot_original_end,
+      otAnnotations: s.ot_annotations || []
+    }));
+
+    CACHE['rx3_clockEvents'] = (clockEvents.data || []).map(e => ({
+      ...e,
+      empId: e.emp_id
+    }));
+
+    CACHE['rx3_leaveRequests'] = (leaveRequests.data || []).map(l => ({
+      ...l,
+      empId: l.emp_id
+    }));
+
+    CACHE['rx3_sickDays'] = (sickDays.data || []).map(s => ({
+      ...s,
+      empId: s.emp_id
+    }));
+
+    CACHE['rx3_otRequests'] = (otRequests.data || []).map(o => ({
+      ...o,
+      empId: o.emp_id
+    }));
+
+    CACHE['rx3_settings'] = settings.data?.[0]?.value || {};
+
+    try {
+      Object.keys(CACHE).forEach(k => localStorage.setItem(k, JSON.stringify(CACHE[k])));
+    } catch(e) {}
+
+    _setSyncIndicator('saved');
+    if (callback) callback();
+  }).catch(err => {
+    console.error('Clock preload failed:', err);
+    _setSyncIndicator('error');
+    if (callback) callback();
+  });
+},
 
   refresh(keys, callback) {
     const safeKeys = keys.filter(k => k !== 'clockEvents');
