@@ -336,15 +336,15 @@ const DB = {
   },
 
 set(k, v) {
-  const key = 'rx3_' + k;
-  CACHE[key] = v;
-
-  // Clock app must NEVER write roster/master data.
-  const readOnlyKeys = ['staff', 'shifts', 'leaveRequests', 'sickDays', 'settings'];
-  if (readOnlyKeys.includes(k)) {
-    console.warn('Clock app blocked from writing:', k);
+  // HARD BLOCK: clock app must never write roster/master data
+  if (['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'].includes(k)) {
+    console.error('BLOCKED CLOCK WRITE TO:', k);
+    alert('Blocked clock app from overwriting ' + k);
     return;
   }
+
+  const key = 'rx3_' + k;
+  CACHE[key] = v;
 
   const json = JSON.stringify(v);
   try { localStorage.setItem(key, json); } catch(e) {}
@@ -352,7 +352,6 @@ set(k, v) {
   DIRTY[key] = true;
   _setSyncIndicator('saving');
 
-  // Clock app may only write safe clock-side records.
   _gasPost({ action: 'set', dataKey: key, value: json })
     .then(() => {
       delete DIRTY[key];
