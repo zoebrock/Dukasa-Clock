@@ -892,14 +892,6 @@ function seedIfEmpty(){
   // Never overwrite clockEvents, shifts, or staff with empty/demo data.
   // Never seed — server data is always authoritative
   return;
-  // Local dev mode only:
-  if(!DB.get("staff"))DB.set("staff",[]);
-  if(!DB.get("clockEvents"))DB.set("clockEvents",[]);
-  if(!DB.get("shifts"))DB.set("shifts",[]);
-  if(!DB.get("settings"))DB.set("settings",{dailyOT:true,weeklyOT:true,dailyOTHours:8,weeklyOTHours:38,otMultiplier:1.5,gracePeriod:5,dispensaryName:"Green Leaf Dispensary"});
-  if(!DB.get("sickDays"))DB.set("sickDays",[]);
-  if(!DB.get("leaveRequests"))DB.set("leaveRequests",[]);
-  if(!DB.get("otRequests"))DB.set("otRequests",[]);
 }
 
 // Show loading overlay while syncing
@@ -919,16 +911,6 @@ DB.preload(ALL_KEYS, function(){
   console.log('Shifts loaded:', (DB.get('shifts')||[]).length);
   console.log('First staff member:', JSON.stringify((DB.get('staff')||[])[0]));
   seedIfEmpty();
-  // Auto-purge orphaned shifts so ? names never appear on clock grid
-  (function(){
-    const staffIds=new Set((DB.get('staff')||[]).map(s=>s.id));
-    const shifts=DB.get('shifts')||[];
-    const clean=shifts.filter(s=>staffIds.has(s.empId));
-    if(clean.length!==shifts.length){CACHE['rx3_shifts']=clean;try{localStorage.setItem('rx3_shifts',JSON.stringify(clean));}catch(e){}
-      _gasPost({action:'set',dataKey:'rx3_shifts',value:JSON.stringify(clean)});
-      console.log('Auto-purged',(shifts.length-clean.length),'orphaned shifts from clock');
-    }
-  })();
   startClock();
   renderGrid();
 });
