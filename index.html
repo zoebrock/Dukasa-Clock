@@ -335,29 +335,35 @@ const DB = {
     } catch(e) { return null; }
   },
 
-  set(k, v) {
-    const key = 'rx3_' + k;
-    CACHE[key] = v;
-    const json = JSON.stringify(v);
-    try { localStorage.setItem(key, json); } catch(e) {}
-    DIRTY[key] = true;
-    _setSyncIndicator('saving');
-    _gasPost({ action: 'set', dataKey: key, value: json })
-      .then(() => {
-        delete DIRTY[key];
-        if (Object.keys(DIRTY).length === 0) _setSyncIndicator('saved');
-      })
-      .catch(err => {
-        console.error('DB.set failed for', key, err);
-        _setSyncIndicator('error');
-        setTimeout(() => {
-          _gasPost({ action: 'set', dataKey: key, value: json })
-            .then(() => { delete DIRTY[key]; _setSyncIndicator('saved'); })
-            .catch(() => _setSyncIndicator('error'));
-        }, 3000);
-      });
-  },
+set(k, v) {
+  const key = 'rx3_' + k;
+  CACHE[key] = v;
 
+  // Clock app must NEVER write roster/master data.
+  const readOnlyKeys = ['staff', 'shifts', 'leaveRequests', 'sickDays', 'settings'];
+  if (readOnlyKeys.includes(k)) {
+    console.warn('Clock app blocked from writing:', k);
+    return;
+  }
+
+  const json = JSON.stringify(v);
+  try { localStorage.setItem(key, json); } catch(e) {}
+
+  DIRTY[key] = true;
+  _setSyncIndicator('saving');
+
+  // Clock app may only write safe clock-side records.
+  _gasPost({ action: 'set', dataKey: key, value: json })
+    .then(() => {
+      delete DIRTY[key];
+      if (Object.keys(DIRTY).length === 0) _setSyncIndicator('saved');
+    })
+    .catch(err => {
+      console.error('DB.set failed for', key, err);
+      _setSyncIndicator('error');
+    });
+},
+  
 preload(keys, callback) {
   _setSyncIndicator('loading');
 
