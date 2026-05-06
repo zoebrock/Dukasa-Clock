@@ -919,11 +919,12 @@ DB.preload(ALL_KEYS, function(){
   startClock();
   renderGrid();
 });
-// No 30s server refresh for clockEvents — the clock owns writes,
-// the Manager Portal owns reads. Refreshing would risk overwriting local events.
-// We only refresh shifts (roster data) every 5 minutes to pick up roster changes.
+// No automatic refresh for clockEvents here.
+// The clock writes events to Supabase, and the Manager Portal reads them from Supabase.
+// Refreshing clockEvents during active use could overwrite unsynced local outbox events.
+// We only refresh roster/supporting data as needed.
 // ═══════════════════════════════════════════════════════════
-//  PERSISTENT OUTBOX — guarantees every clock event reaches GAS
+//  PERSISTENT OUTBOX — guarantees every clock event reaches Supabase
 //
 //  How it works:
 //  1. Every clock event is saved to localStorage outbox immediately
@@ -954,13 +955,9 @@ function outbox_add(serverEvent, photo) {
     outbox_save(items);
     console.log('[OUTBOX] Added event', serverEvent.id, '— outbox size:', items.length);
   }
-  outbox_flush(); // Try immediately
-}
-
-let _outboxFlushing = false;
-
 async function outbox_flush() {
   if (_outboxFlushing) return;
+
   const items = outbox_get();
   const unsent = items.filter(i => !i.synced);
   if (!unsent.length) return;
@@ -970,87 +967,92 @@ async function outbox_flush() {
 
   for (const item of unsent) {
     try {
-      const r = await _gasPost({ action: 'appendClockEvent', event: item.event });
-      if (r.ok || r.duplicate) {
-        // Mark as synced in outbox
-        const current = outbox_get();
-        const idx = current.findIndex(i => i.event.id === item.event.id);
-        if (idx >= 0) { current[idx].synced = true; current[idx].syncedAt = Date.now(); }
-        outbox_save(current);
+      let photoUrl = item.event.photoUrl || null;
 
-        // Mark synced in local clockEvents cache too
-        const cached = CACHE['rx3_clockEvents'] || [];
-        const ci = cached.findIndex(e => e.id === item.event.id);
-        if (ci >= 0) { cached[ci].synced = true; CACHE['rx3_clockEvents'] = cached; }
+      // 1. Upload photo to Google Drive FIRST, if photo exists
+      if (item.photo && !photoUrl) {
+        const pr = await _gasPost({
+          action: 'uploadClockPhoto',
+          eventId: item.event.id,
+          empId: item.event.empId,
+          type: item.event.type,
+          date: item.event.date,
+          time: item.event.time,
+          data: item.photo
+        });
 
-        console.log('[OUTBOX] Event', item.event.id, 'confirmed on server. Total on server:', r.total);
-
-        // Upload photo to Drive if present (non-blocking, best-effort)
-        if (item.photo) {
-          _gasPost({
-            action: 'uploadClockPhoto',
-            eventId: item.event.id,
-            empId: item.event.empId,
-            type: item.event.type,
-            date: item.event.date,
-            time: item.event.time,
-            data: item.photo
-          })
-          .then(pr => {
-            if (pr.ok && pr.result && pr.result.url) {
-              console.log('[OUTBOX] Photo uploaded to Drive:', pr.result.url);
-              // Patch Drive URL into local cache
-              const ce = CACHE['rx3_clockEvents'] || [];
-              const pi = ce.findIndex(e => e.id === item.event.id);
-              if (pi >= 0) {
-                ce[pi].photoUrl = pr.result.url;
-                CACHE['rx3_clockEvents'] = ce;
-                try { localStorage.setItem('rx3_clockEvents', JSON.stringify(ce)); } catch(e) {}
-              }
-              // Remove from outbox now that photo is also done
-              const ob = outbox_get().filter(i => i.event.id !== item.event.id);
-              outbox_save(ob);
-            }
-          })
-          .catch(err => console.warn('[OUTBOX] Photo upload failed (will not retry):', err));
-        } else {
-          // No photo — remove from outbox immediately
-          const ob = outbox_get().filter(i => i.event.id !== item.event.id);
-          outbox_save(ob);
+        if (!pr.ok || !pr.result || !pr.result.url) {
+          throw new Error(pr.error || 'Photo upload failed');
         }
 
-      } else {
-        console.warn('[OUTBOX] appendClockEvent returned error for', item.event.id, ':', r.error, '— will retry');
+        photoUrl = pr.result.url;
+        console.log('[OUTBOX] Photo uploaded to Drive:', photoUrl);
       }
+
+      // 2. Save clock event to Supabase
+      const { error } = await supabaseClient2
+        .from('clock_events')
+        .upsert({
+          id: item.event.id,
+          emp_id: item.event.empId,
+          shift_id: item.event.shiftId || null,
+          type: item.event.type,
+          date: item.event.date,
+          time: item.event.time,
+          ts: item.event.ts,
+          reason: item.event.reason || null,
+          photo_url: photoUrl,
+          synced: true,
+          created_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+
+      if (error) throw error;
+
+      // 3. Mark synced locally
+      const current = outbox_get();
+      const idx = current.findIndex(i => i.event.id === item.event.id);
+
+      if (idx >= 0) {
+        current[idx].synced = true;
+        current[idx].syncedAt = Date.now();
+        current[idx].event.photoUrl = photoUrl;
+      }
+
+      outbox_save(current);
+
+      // 4. Patch local clockEvents cache
+      const cached = CACHE['rx3_clockEvents'] || [];
+      const ci = cached.findIndex(e => e.id === item.event.id);
+
+      if (ci >= 0) {
+        cached[ci].synced = true;
+        cached[ci].photoUrl = photoUrl;
+        CACHE['rx3_clockEvents'] = cached;
+
+        try {
+          localStorage.setItem('rx3_clockEvents', JSON.stringify(cached));
+        } catch(e) {}
+      }
+
+      // 5. Remove from outbox after BOTH photo + Supabase save succeed
+      const ob = outbox_get().filter(i => i.event.id !== item.event.id);
+      outbox_save(ob);
+
+      console.log('[OUTBOX] Event saved to Supabase:', item.event.id);
+
     } catch(err) {
-      console.warn('[OUTBOX] Network error sending', item.event.id, ':', err.message, '— will retry');
+      console.warn(
+        '[OUTBOX] Failed syncing',
+        item.event.id,
+        ':',
+        err.message,
+        '— will retry'
+      );
     }
   }
 
-  // Clean up old synced entries (older than 24h) to prevent outbox bloat
-  const cleaned = outbox_get().filter(i => !i.synced || (Date.now() - (i.syncedAt||0)) < 86400000);
-  outbox_save(cleaned);
-
   _outboxFlushing = false;
 }
-
-// ── Flush outbox on startup (catches any events from previous sessions) ──
-outbox_flush();
-
-// ── Flush outbox every 8 seconds ─────────────────────────────────────────
-setInterval(outbox_flush, 8000);
-
-// ── Smart sync — ping GAS every 10s, refresh roster data when changed ────
-// The clock NEVER pulls clockEvents from server (it IS the source of truth)
-setInterval(async () => {
-  try {
-    await new Promise(resolve => DB.refresh(
-      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'], resolve
-    ));
-    if (document.getElementById('screen-home').classList.contains('active')) renderGrid();
-  } catch(e) { /* silent */ }
-}, 30000);
-
 
 // ── CLOCK REFRESH BUTTON ────────────────────────────────────
 async function clockRefresh() {
