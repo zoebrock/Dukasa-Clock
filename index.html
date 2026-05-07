@@ -940,7 +940,7 @@ DB.preload(ALL_KEYS, function(){
 const OUTBOX_KEY = 'ck_outbox';
 
 function outbox_get() {
-  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY)||'[]'); } catch(e) { return []; }
+  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]'); } catch(e) { return []; }
 }
 
 function outbox_save(items) {
@@ -949,27 +949,39 @@ function outbox_save(items) {
 
 function outbox_add(serverEvent, photo) {
   const items = outbox_get();
-  // Don't add duplicates
+
   if (!items.find(i => i.event.id === serverEvent.id)) {
-    items.push({ event: serverEvent, photo: photo||null, addedAt: Date.now() });
+    items.push({
+      event: serverEvent,
+      photo: photo || null,
+      addedAt: Date.now(),
+      synced: false
+    });
+
     outbox_save(items);
     console.log('[OUTBOX] Added event', serverEvent.id, '— outbox size:', items.length);
   }
+
+  outbox_flush();
+}
+
+let _outboxFlushing = false;
+
 async function outbox_flush() {
   if (_outboxFlushing) return;
 
   const items = outbox_get();
   const unsent = items.filter(i => !i.synced);
+
   if (!unsent.length) return;
 
   _outboxFlushing = true;
-  console.log('[OUTBOX] Flushing', unsent.length, 'unsent event(s)...');
+  console.log('[OUTBOX] Flushing', unsent.length, 'unsent event(s) to Supabase...');
 
   for (const item of unsent) {
     try {
       let photoUrl = item.event.photoUrl || null;
 
-      // 1. Upload photo to Google Drive FIRST, if photo exists
       if (item.photo && !photoUrl) {
         const pr = await _gasPost({
           action: 'uploadClockPhoto',
@@ -986,29 +998,29 @@ async function outbox_flush() {
         }
 
         photoUrl = pr.result.url;
-        console.log('[OUTBOX] Photo uploaded to Drive:', photoUrl);
       }
 
-      // 2. Save clock event to Supabase
+      const row = {
+        id: item.event.id,
+        emp_id: item.event.empId,
+        shift_id: item.event.shiftId || currentShiftId || null,
+        type: item.event.type,
+        date: item.event.date,
+        time: item.event.time,
+        timestamp: item.event.ts || new Date().toISOString(),
+        reason: item.event.reason || null,
+        photo_url: photoUrl,
+        synced: true,
+        source: 'clock_app',
+        created_at: new Date().toISOString()
+      };
+
       const { error } = await supabaseClient2
         .from('clock_events')
-        .upsert({
-          id: item.event.id,
-          emp_id: item.event.empId,
-          shift_id: item.event.shiftId || null,
-          type: item.event.type,
-          date: item.event.date,
-          time: item.event.time,
-          ts: item.event.ts,
-          reason: item.event.reason || null,
-          photo_url: photoUrl,
-          synced: true,
-          created_at: new Date().toISOString()
-        }, { onConflict: 'id' });
+        .upsert(row, { onConflict: 'id' });
 
       if (error) throw error;
 
-      // 3. Mark synced locally
       const current = outbox_get();
       const idx = current.findIndex(i => i.event.id === item.event.id);
 
@@ -1020,39 +1032,45 @@ async function outbox_flush() {
 
       outbox_save(current);
 
-      // 4. Patch local clockEvents cache
       const cached = CACHE['rx3_clockEvents'] || [];
       const ci = cached.findIndex(e => e.id === item.event.id);
 
       if (ci >= 0) {
         cached[ci].synced = true;
         cached[ci].photoUrl = photoUrl;
+        cached[ci].timestamp = row.timestamp;
+        cached[ci].ts = row.timestamp;
         CACHE['rx3_clockEvents'] = cached;
-
-        try {
-          localStorage.setItem('rx3_clockEvents', JSON.stringify(cached));
-        } catch(e) {}
+        try { localStorage.setItem('rx3_clockEvents', JSON.stringify(cached)); } catch(e) {}
       }
 
-      // 5. Remove from outbox after BOTH photo + Supabase save succeed
-      const ob = outbox_get().filter(i => i.event.id !== item.event.id);
-      outbox_save(ob);
+      outbox_save(outbox_get().filter(i => i.event.id !== item.event.id));
 
       console.log('[OUTBOX] Event saved to Supabase:', item.event.id);
 
     } catch(err) {
-      console.warn(
-        '[OUTBOX] Failed syncing',
-        item.event.id,
-        ':',
-        err.message,
-        '— will retry'
-      );
+      console.warn('[OUTBOX] Failed syncing', item.event.id, ':', err.message, '— will retry');
     }
   }
 
   _outboxFlushing = false;
 }
+
+outbox_flush();
+setInterval(outbox_flush, 8000);
+
+setInterval(async () => {
+  try {
+    await new Promise(resolve => DB.refresh(
+      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'],
+      resolve
+    ));
+
+    if (document.getElementById('screen-home')?.classList.contains('active')) {
+      renderGrid();
+    }
+  } catch(e) {}
+}, 30000);
 
 // ── CLOCK REFRESH BUTTON ────────────────────────────────────
 async function clockRefresh() {
