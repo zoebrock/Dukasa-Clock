@@ -940,14 +940,18 @@ DB.preload(ALL_KEYS, function(){
 const OUTBOX_KEY = 'ck_outbox';
 
 function outbox_get() {
-  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]'); } catch(e) { return []; }
+  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]'); }
+  catch(e) { return []; }
 }
 
 function outbox_save(items) {
-  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(items)); } catch(e) {}
+  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(items)); }
+  catch(e) {}
 }
 
 function outbox_add(serverEvent, photo) {
+  if (!serverEvent.id) serverEvent.id = 'ce_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+
   const items = outbox_get();
 
   if (!items.find(i => i.event.id === serverEvent.id)) {
@@ -955,7 +959,9 @@ function outbox_add(serverEvent, photo) {
       event: serverEvent,
       photo: photo || null,
       addedAt: Date.now(),
-      synced: false
+      synced: false,
+      attempts: 0,
+      lastError: ''
     });
 
     outbox_save(items);
@@ -970,7 +976,7 @@ let _outboxFlushing = false;
 async function outbox_flush() {
   if (_outboxFlushing) return;
 
-  const items = outbox_get();
+  let items = outbox_get();
   const unsent = items.filter(i => !i.synced);
 
   if (!unsent.length) return;
@@ -980,9 +986,9 @@ async function outbox_flush() {
 
   for (const item of unsent) {
     try {
-      let photoUrl = item.event.photoUrl || null;
+      let photoUrl = item.event.photoUrl || item.event.photo_url || null;
 
-      if (item.photo && !photoUrl) {
+      if (item.photo && !photoUrl && item.photo !== 'no-cam') {
         const pr = await _gasPost({
           action: 'uploadClockPhoto',
           eventId: item.event.id,
@@ -994,7 +1000,7 @@ async function outbox_flush() {
         });
 
         if (!pr.ok || !pr.result || !pr.result.url) {
-          throw new Error(pr.error || 'Photo upload failed');
+          throw new Error(pr.error || pr?.result?.error || 'Photo upload failed');
         }
 
         photoUrl = pr.result.url;
@@ -1003,58 +1009,86 @@ async function outbox_flush() {
       const row = {
         id: item.event.id,
         emp_id: item.event.empId,
-        shift_id: item.event.shiftId || currentShiftId || null,
+        shift_id: item.event.shiftId || null,
         type: item.event.type,
         date: item.event.date,
         time: item.event.time,
-        timestamp: item.event.ts || new Date().toISOString(),
+        ts: item.event.ts || new Date().toISOString(),
         reason: item.event.reason || null,
-        photo_url: photoUrl,
+        photo_url: photoUrl || null,
         synced: true,
-        source: 'clock_app',
-        created_at: new Date().toISOString()
+        created_at: item.event.createdAt || item.event.created_at || new Date().toISOString(),
+        synced_at: new Date().toISOString()
       };
 
-      const { error } = await supabaseClient2
+      const client = window.supabaseClient || window.supabaseClient2 || supabaseClient || supabaseClient2;
+
+      if (!client) {
+        throw new Error('Supabase client missing in clock app');
+      }
+
+      const { error } = await client
         .from('clock_events')
         .upsert(row, { onConflict: 'id' });
 
       if (error) throw error;
 
       const current = outbox_get();
-      const idx = current.findIndex(i => i.event.id === item.event.id);
-
-      if (idx >= 0) {
-        current[idx].synced = true;
-        current[idx].syncedAt = Date.now();
-        current[idx].event.photoUrl = photoUrl;
-      }
-
-      outbox_save(current);
+      const remaining = current.filter(i => i.event.id !== item.event.id);
+      outbox_save(remaining);
 
       const cached = CACHE['rx3_clockEvents'] || [];
       const ci = cached.findIndex(e => e.id === item.event.id);
 
       if (ci >= 0) {
-        cached[ci].synced = true;
-        cached[ci].photoUrl = photoUrl;
-        cached[ci].timestamp = row.timestamp;
-        cached[ci].ts = row.timestamp;
-        CACHE['rx3_clockEvents'] = cached;
-        try { localStorage.setItem('rx3_clockEvents', JSON.stringify(cached)); } catch(e) {}
+        cached[ci] = {
+          ...cached[ci],
+          synced: true,
+          photoUrl,
+          photo_url: photoUrl,
+          syncedAt: new Date().toISOString()
+        };
+      } else {
+        cached.push({
+          ...item.event,
+          synced: true,
+          photoUrl,
+          photo_url: photoUrl
+        });
       }
 
-      outbox_save(outbox_get().filter(i => i.event.id !== item.event.id));
+      CACHE['rx3_clockEvents'] = cached;
 
-      console.log('[OUTBOX] Event saved to Supabase:', item.event.id);
+      try {
+        localStorage.setItem('rx3_clockEvents', JSON.stringify(cached));
+      } catch(e) {}
 
-    } catch(err) {
-      console.warn('[OUTBOX] Failed syncing', item.event.id, ':', err.message, '— will retry');
+      console.log('[OUTBOX] Event synced to Supabase:', item.event.id);
+
+    } catch (err) {
+      console.warn('[OUTBOX] Sync failed, will retry:', item.event?.id, err.message);
+
+      const current = outbox_get();
+      const idx = current.findIndex(i => i.event.id === item.event.id);
+
+      if (idx >= 0) {
+        current[idx].attempts = (current[idx].attempts || 0) + 1;
+        current[idx].lastError = err.message || String(err);
+        current[idx].lastAttemptAt = new Date().toISOString();
+        current[idx].synced = false;
+        outbox_save(current);
+      }
     }
   }
 
   _outboxFlushing = false;
 }
+
+window.addEventListener('online', outbox_flush);
+window.addEventListener('focus', outbox_flush);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) outbox_flush();
+});
 
 outbox_flush();
 setInterval(outbox_flush, 8000);
@@ -1062,15 +1096,12 @@ setInterval(outbox_flush, 8000);
 setInterval(async () => {
   try {
     await new Promise(resolve => DB.refresh(
-      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'],
-      resolve
+      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'], resolve
     ));
-
-    if (document.getElementById('screen-home')?.classList.contains('active')) {
-      renderGrid();
-    }
+    if (document.getElementById('screen-home')?.classList.contains('active')) renderGrid();
   } catch(e) {}
 }, 30000);
+  
 // ── CLOCK REFRESH BUTTON ────────────────────────────────────
 async function clockRefresh() {
   const btn  = document.getElementById('ck-refresh-btn');
