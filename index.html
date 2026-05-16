@@ -402,11 +402,31 @@ preload(keys, callback) {
       otAnnotations: s.ot_annotations || []
     }));
 
-    CACHE['rx3_clockEvents'] = (clockEvents.data || []).map(e => ({
-      ...e,
-      empId: e.emp_id
-    }));
+const serverClockEvents = (clockEvents.data || []).map(e => ({
+  ...e,
+  empId: e.emp_id || e.empId,
+  shiftId: e.shift_id || e.shiftId,
+  photoUrl: e.photo_url || e.photoUrl,
+  ts: e.ts || e.timestamp || e.created_at || null,
+  type: String(e.type || '').trim()
+}));
 
+const localClockEvents = (() => {
+  try {
+    return JSON.parse(localStorage.getItem('rx3_clockEvents') || '[]');
+  } catch(e) {
+    return [];
+  }
+})();
+
+const mergedById = new Map();
+
+serverClockEvents.forEach(e => mergedById.set(e.id, e));
+localClockEvents.forEach(e => {
+  if (e && e.id && e.synced === false) mergedById.set(e.id, e);
+});
+
+CACHE['rx3_clockEvents'] = [...mergedById.values()];
     CACHE['rx3_leaveRequests'] = (leaveRequests.data || []).map(l => ({
       ...l,
       empId: l.emp_id
@@ -558,22 +578,56 @@ function startClock(){function tick(){const n=new Date();const cl=document.getEl
 
 // ── BREAK STATE HELPER ─────────────────────────────────────
 function calcBreakState(sortedEvents){
-  const sessions=[];let pending=null;
-  for(const e of sortedEvents){
-    if(e.type==='break-start'){pending=e;}
-    else if(e.type==='break-end'&&pending){sessions.push({start:pending,end:e});pending=null;}
-  }
-  if(pending) sessions.push({start:pending,end:null});
-  const activeBreak=sessions.find(s=>!s.end)||null;
-  const onBreak=!!activeBreak;
-  const usedMins=sessions.filter(s=>s.end).reduce((sum,s)=>{
-    const sMs=s.start.ts?new Date(s.start.ts).getTime():0;
-    const eMs=s.end.ts?new Date(s.end.ts).getTime():0;
-    return sum+(eMs>sMs?Math.floor((eMs-sMs)/60000):0);
-  },0);
-  return{onBreak,sessions,usedMins,activeBreak};
-}
+  const events = [...(sortedEvents || [])].sort((a,b) => {
+    const at = a.ts || `${a.date || ''}T${a.time || '00:00'}:00`;
+    const bt = b.ts || `${b.date || ''}T${b.time || '00:00'}:00`;
+    return new Date(at) - new Date(bt);
+  });
 
+  const last = events[events.length - 1] || null;
+
+  const sessions = [];
+  let pending = null;
+
+  for (const e of events) {
+    if (e.type === 'clock-out') {
+      pending = null;
+      continue;
+    }
+
+    if (e.type === 'break-start') {
+      pending = e;
+    }
+
+    if (e.type === 'break-end' && pending) {
+      sessions.push({ start: pending, end: e });
+      pending = null;
+    }
+  }
+
+  const activeBreak =
+    last && last.type === 'break-start' && pending
+      ? { start: pending, end: null }
+      : null;
+
+  if (activeBreak) sessions.push(activeBreak);
+
+  const usedMins = sessions
+    .filter(s => s.end)
+    .reduce((sum, s) => {
+      const sMs = s.start.ts ? new Date(s.start.ts).getTime() : new Date(`${s.start.date}T${s.start.time}:00`).getTime();
+      const eMs = s.end.ts ? new Date(s.end.ts).getTime() : new Date(`${s.end.date}T${s.end.time}:00`).getTime();
+      return sum + (eMs > sMs ? Math.floor((eMs - sMs) / 60000) : 0);
+    }, 0);
+
+  return {
+    last,
+    onBreak: !!activeBreak,
+    sessions,
+    usedMins,
+    activeBreak
+  };
+}
 function renderGrid(){
   const all=[...(DB.get("staff")||[])].sort((a,b)=>a.first.localeCompare(b.first)||a.last.localeCompare(b.last));
   const q=(document.getElementById("staff-search").value||"").toLowerCase().trim();
