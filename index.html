@@ -914,34 +914,134 @@ function confirmClock(){
   CACHE['rx3_clockEvents']=localEvents;
   try{localStorage.setItem('rx3_clockEvents',JSON.stringify(localEvents));}catch(e){}
 
-  // ── Step 2: Add to persistent outbox ─────────────────────
-  // The outbox worker will keep retrying until the server confirms.
-  outbox_add(serverEvent, photo);
+// ── Step 2: Save clock event to Supabase immediately ─────
+const { error } = await supabaseClient2
+  .from('clock_events')
+  .upsert({
+    id: serverEvent.id,
+    emp_id: serverEvent.empId,
+    shift_id: serverEvent.shiftId || null,
+    type: serverEvent.type,
+    date: serverEvent.date,
+    time: serverEvent.time,
+    ts: serverEvent.ts,
+    reason: serverEvent.reason || null,
+    photo_url: null,
+    synced: true,
+    created_at: new Date().toISOString(),
+    synced_at: new Date().toISOString()
+  }, { onConflict: 'id' });
 
-  showSuccess();
+if (error) throw error;
+
+// ── Step 3: Keep photo/outbox as secondary backup ────────
+outbox_add(serverEvent, photo);
+
+showSuccess();
 }
 
 function showSuccess(){
   const icons={"clock-in":"IN","clock-out":"OUT","break-start":"BRK","break-end":"OK"}[currentAction]||"OK";
   const msgs={"clock-in":"Clocked in!","clock-out":"Clocked out!","break-start":"Break started","break-end":"Break ended"}[currentAction];
-  const subs={"clock-in":`Have a great shift, ${currentEmp.first}!`,"clock-out":`Great work, ${currentEmp.first}!`,"break-start":"Enjoy your break.","break-end":`Welcome back, ${currentEmp.first}!`}[currentAction];
-  document.getElementById("succ-icon").textContent=icons;document.getElementById("succ-msg").textContent=msgs;
+  const subs={
+    "clock-in":`Have a great shift, ${currentEmp.first}!`,
+    "clock-out":`Great work, ${currentEmp.first}!`,
+    "break-start":"Enjoy your break.",
+    "break-end":`Welcome back, ${currentEmp.first}!`
+  }[currentAction];
+
+  document.getElementById("succ-icon").textContent=icons;
+  document.getElementById("succ-msg").textContent=msgs;
   document.getElementById("succ-sub").textContent=subs;
-  document.getElementById("succ-time").textContent=NOWT()+" - "+new Date().toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"});
+  document.getElementById("succ-time").textContent=
+    NOWT()+" - "+
+    new Date().toLocaleDateString("en-AU",{
+      weekday:"long",
+      day:"numeric",
+      month:"long"
+    });
+
   showModalPanel("modal-success-panel");
-  let count=6;const ae=document.getElementById("succ-auto");ae.textContent=`Returning in ${count}s`;
-  if(autoTimer)clearInterval(autoTimer);
-  autoTimer=setInterval(()=>{count--;if(count<=0){clearInterval(autoTimer);autoTimer=null;goHome();}else ae.textContent=`Returning in ${count}s`;},1000);
+
+  let count=6;
+  const ae=document.getElementById("succ-auto");
+  ae.textContent=`Returning in ${count}s`;
+
+  if(autoTimer) clearInterval(autoTimer);
+
+  autoTimer=setInterval(()=>{
+    count--;
+
+    if(count<=0){
+      clearInterval(autoTimer);
+      autoTimer=null;
+      goHome();
+    } else {
+      ae.textContent=`Returning in ${count}s`;
+    }
+  },1000);
 }
 
-function goHome(){if(autoTimer){clearInterval(autoTimer);autoTimer=null;}currentEmp=null;currentAction=null;currentShiftId=null;capturedPhoto=null;pinBuf="";_pinDots=null;document.getElementById("staff-search").value="";document.querySelectorAll(".modal-overlay-dk").forEach(s=>s.classList.remove("active"));showModalPanel("pin-panel");SS("screen-home");renderGrid();}
-function toggleOT(){document.getElementById("ot-form").classList.toggle("open");}
+function goHome(){
+  if(autoTimer){
+    clearInterval(autoTimer);
+    autoTimer=null;
+  }
+
+  currentEmp=null;
+  currentAction=null;
+  currentShiftId=null;
+  capturedPhoto=null;
+  pinBuf="";
+  _pinDots=null;
+
+  document.getElementById("staff-search").value="";
+
+  document
+    .querySelectorAll(".modal-overlay-dk")
+    .forEach(s=>s.classList.remove("active"));
+
+  showModalPanel("pin-panel");
+  SS("screen-home");
+  renderGrid();
+}
+
+function toggleOT(){
+  document.getElementById("ot-form").classList.toggle("open");
+}
+
 function submitOT(){
-  const start=document.getElementById("ot-start").value;const end=document.getElementById("ot-end").value;const reason=document.getElementById("ot-reason").value.trim();
-  if(!reason){alert("A reason is required for OT requests.");return;}
+  const start=document.getElementById("ot-start").value;
+  const end=document.getElementById("ot-end").value;
+  const reason=document.getElementById("ot-reason").value.trim();
+
+  if(!reason){
+    alert("A reason is required for OT requests.");
+    return;
+  }
+
   const reqs=DB.get("otRequests")||[];
-  reqs.push({id:"ot"+Date.now(),empId:currentEmp.id,date:TODAY(),start,end,reason,task:"",availConfirmed:true,approved:null,requestedBy:"staff",staffRead:false,submitted:new Date().toISOString()});
-  DB.set("otRequests",reqs);document.getElementById("ot-form").classList.remove("open");document.getElementById("ot-reason").value="";
+
+  reqs.push({
+    id:"ot"+Date.now(),
+    empId:currentEmp.id,
+    date:TODAY(),
+    start,
+    end,
+    reason,
+    task:"",
+    availConfirmed:true,
+    approved:null,
+    requestedBy:"staff",
+    staffRead:false,
+    submitted:new Date().toISOString()
+  });
+
+  DB.set("otRequests",reqs);
+
+  document.getElementById("ot-form").classList.remove("open");
+  document.getElementById("ot-reason").value="";
+
   alert("OT request submitted!");
 }
 
@@ -954,7 +1054,8 @@ function seedIfEmpty(){
 }
 
 // Show loading overlay while syncing
-document.body.insertAdjacentHTML('beforeend',
+document.body.insertAdjacentHTML(
+  'beforeend',
   '<div id="dk-loader" style="position:fixed;inset:0;background:#f5f5f3;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999">'+
   '<div style="font-size:22px;font-weight:700;color:#534AB7;margin-bottom:12px">Dukasa Time Clock</div>'+
   '<div style="font-size:13px;color:#585854;margin-bottom:20px">Connecting to roster data...</div>'+
@@ -965,14 +1066,18 @@ document.body.insertAdjacentHTML('beforeend',
 
 DB.preload(ALL_KEYS, function(){
   const loader=document.getElementById('dk-loader');
+
   if(loader) loader.remove();
+
   console.log('Staff loaded:', (DB.get('staff')||[]).length);
   console.log('Shifts loaded:', (DB.get('shifts')||[]).length);
   console.log('First staff member:', JSON.stringify((DB.get('staff')||[])[0]));
+
   seedIfEmpty();
   startClock();
   renderGrid();
 });
+
 // No automatic refresh for clockEvents here.
 // The clock writes events to Supabase, and the Manager Portal reads them from Supabase.
 // Refreshing clockEvents during active use could overwrite unsynced local outbox events.
