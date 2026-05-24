@@ -885,7 +885,7 @@ function cancelClock(){
   }
 }
 
-function confirmClock(){
+async function confirmClock(){
   if(!capturedPhoto){document.getElementById("cam-hint").textContent="Please take a photo first — tap the Take photo button.";document.getElementById("cam-hint").style.color="var(--red)";return;}
   const rb=document.getElementById("reason-block");
   if(rb.style.display!=="none"){const r=document.getElementById("reason-ta").value.trim();if(!r){document.getElementById("reason-ta").style.borderColor="var(--red)";setTimeout(()=>document.getElementById("reason-ta").style.borderColor="",2000);return;}}
