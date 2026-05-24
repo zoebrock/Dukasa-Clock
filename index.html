@@ -704,8 +704,25 @@ function renderActionScreen(){
   else if(isLeave)sb.innerHTML=`<span style="color:var(--amber)">On ${isLeave.type} today</span>`;
   else if(todayShift){
     const grossH=(MD(todayShift.start,todayShift.end))/60;
-    const totalBrk=grossH>8?50:grossH>=8?40:30;
-    const remBrk=Math.max(0,totalBrk-usedBreakMins2);
+
+// Break policy
+// 8hr shift = 40min total
+// 9hr+ shift = 50min total
+// shorter shifts = 30min total
+
+const totalBrk =
+  grossH > 8 ? 50 :
+  grossH >= 7 ? 40 :
+  30;
+
+const paidBrk = 30;
+const unpaidBrk = Math.max(0, totalBrk - paidBrk);
+
+const usedBreakMins2 =
+  getUsedBreakMins(currentEmp.id, TODAY());
+
+const remBrk2 =
+  Math.max(0, totalBrk - usedBreakMins2);
     const brkHistory=breakSessions2.filter(s=>s.end).map(s=>s.start.time+'–'+s.end.time).join(', ');
     let brkLine;
     if(onBreak){
@@ -715,7 +732,11 @@ function renderActionScreen(){
       const remText=remBrk>0?remBrk+' min remaining':'fully used';
       brkLine='Breaks: '+brkHistory+' &middot; <strong style="color:'+remColor+'">'+remText+'</strong>';
     } else {
-      brkLine=totalBrk+'min break available';
+      brkLine =
+  totalBrk + ' min break available' +
+  (unpaidBrk > 0
+    ? ' · includes 30 min paid + ' + unpaidBrk + ' min unpaid'
+    : '');
     }
     sb.innerHTML=`<strong>${todayShift.start} - ${todayShift.end}</strong><br><span style="font-size:12px;color:var(--t2)">${brkLine}</span>${ci?`<br><span style="color:var(--teal);font-size:12px">Clocked in ${ci.time}</span>`:""}${co?`<br><span style="color:var(--green);font-size:12px">Clocked out ${co.time}</span>`:""}`;  }
   else sb.innerHTML=`<span style="color:var(--t3)">No published shift today</span>`;
