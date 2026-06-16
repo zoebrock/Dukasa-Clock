@@ -300,9 +300,117 @@ const supabaseClient2 = window.supabase.createClient(
 //  Never overwrite local clockEvents with stale server data.
 // ═══════════════════════════════════════════════════════
 const PROXY = '/api/gas';
-const CLOCK_VERSION = '2.2'; // persistent outbox — never lose a clock event
+const CLOCK_VERSION = '2.3'; // preserve active clock status during roster refresh
 const CACHE = {};
 const DIRTY = {};
+
+function _clockTodayString() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function _normaliseClockEvent(e) {
+  if (!e) return null;
+
+  const ts = e.ts || e.timestamp || e.created_at || e.createdAt || null;
+  const type = String(e.type || '').trim();
+  const empId = e.emp_id || e.empId;
+  const shiftId = e.shift_id || e.shiftId || null;
+  const photoUrl = e.photo_url || e.photoUrl || null;
+
+  return {
+    ...e,
+    empId,
+    shiftId,
+    photoUrl,
+    photo_url: photoUrl,
+    ts,
+    type,
+    date: e.date || (ts ? String(ts).slice(0, 10) : null),
+    time: e.time || (ts ? new Date(ts).toTimeString().slice(0, 5) : ''),
+    synced: e.synced === undefined ? true : e.synced
+  };
+}
+
+function _clockEventKey(e) {
+  if (!e) return '';
+  if (e.id) return String(e.id);
+  return [e.empId || e.emp_id || '', e.shiftId || e.shift_id || '', e.date || '', e.time || '', e.type || ''].join('|');
+}
+
+function _clockEventSortValue(e) {
+  const raw = e?.ts || (e?.date && e?.time ? `${e.date}T${e.time}:00` : '');
+  const ms = raw ? new Date(raw).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function _readStoredClockEvents() {
+  try {
+    const raw = localStorage.getItem('rx3_clockEvents') || '[]';
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(e) {
+    return [];
+  }
+}
+
+function _writeStoredClockEvents(events) {
+  try {
+    localStorage.setItem('rx3_clockEvents', JSON.stringify(events || []));
+  } catch(e) {}
+}
+
+function _mergeClockEventsPreservingLocal(serverRows, localRows) {
+  const today = _clockTodayString();
+  const merged = new Map();
+
+  (serverRows || [])
+    .map(_normaliseClockEvent)
+    .filter(Boolean)
+    .forEach(e => {
+      const key = _clockEventKey(e);
+      if (key) merged.set(key, e);
+    });
+
+  (localRows || [])
+    .map(_normaliseClockEvent)
+    .filter(Boolean)
+    .forEach(local => {
+      const key = _clockEventKey(local);
+      if (!key) return;
+
+      // Preserve local same-day events even when marked synced.
+      // This stops the iPad from visually clearing an active clock-in when
+      // staff refresh the roster before Supabase has returned the latest event.
+      const keepLocal = local.synced === false || local.date === today || !merged.has(key);
+      if (!keepLocal) return;
+
+      const server = merged.get(key);
+      if (server) {
+        merged.set(key, {
+          ...local,
+          ...server,
+          photo: local.photo || server.photo || null,
+          photoUrl: server.photoUrl || local.photoUrl || null,
+          photo_url: server.photo_url || local.photo_url || null,
+          synced: server.synced === undefined ? local.synced : server.synced
+        });
+      } else {
+        merged.set(key, local);
+      }
+    });
+
+  return [...merged.values()].sort((a, b) => _clockEventSortValue(a) - _clockEventSortValue(b));
+}
+
+function _cacheClockEvents(events) {
+  CACHE['rx3_clockEvents'] = events || [];
+  _writeStoredClockEvents(CACHE['rx3_clockEvents']);
+}
+
 
 async function _gasGet(action, params = {}) {
   const url = new URL(PROXY, window.location.origin);
@@ -402,31 +510,13 @@ preload(keys, callback) {
       otAnnotations: s.ot_annotations || []
     }));
 
-const serverClockEvents = (clockEvents.data || []).map(e => ({
-  ...e,
-  empId: e.emp_id || e.empId,
-  shiftId: e.shift_id || e.shiftId,
-  photoUrl: e.photo_url || e.photoUrl,
-  ts: e.ts || e.timestamp || e.created_at || null,
-  type: String(e.type || '').trim()
-}));
+const serverClockEvents = clockEvents.data || [];
+const localClockEvents = [
+  ..._readStoredClockEvents(),
+  ...(CACHE['rx3_clockEvents'] || [])
+];
 
-const localClockEvents = (() => {
-  try {
-    return JSON.parse(localStorage.getItem('rx3_clockEvents') || '[]');
-  } catch(e) {
-    return [];
-  }
-})();
-
-const mergedById = new Map();
-
-serverClockEvents.forEach(e => mergedById.set(e.id, e));
-localClockEvents.forEach(e => {
-  if (e && e.id && e.synced === false) mergedById.set(e.id, e);
-});
-
-CACHE['rx3_clockEvents'] = [...mergedById.values()];
+_cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClockEvents));
     CACHE['rx3_leaveRequests'] = (leaveRequests.data || []).map(l => ({
       ...l,
       empId: l.emp_id
@@ -470,18 +560,40 @@ CACHE['rx3_clockEvents'] = [...mergedById.values()];
     };
     Promise.all(safeKeys.map(k => {
       const table = tableMap[k];
-      return table ? supabase.from(table).select('*') : Promise.resolve({ data: [] });
+      return table ? supabaseClient2.from(table).select('*') : Promise.resolve({ data: [] });
     })).then(results => {
       safeKeys.forEach((k, i) => {
         const data = results[i].data || [];
-        if (k === 'shifts') {
+        if (k === 'staff') {
+          CACHE['rx3_staff'] = data.map(r => ({
+            ...r,
+            availNotes: r.avail_notes,
+            contractStart: r.contract_start,
+            contractEnd: r.contract_end,
+            contractBreak: r.contract_break,
+            contractDays: r.contract_days,
+            contractPerDay: r.contract_per_day,
+            contractedHrsPerWeek: r.contracted_hrs_per_week,
+            autoShift: r.auto_shift
+          }));
+        } else if (k === 'shifts') {
           CACHE['rx3_shifts'] = data.map(s => ({
-            ...s, empId: s.emp_id, breakMin: s.break_min,
-            isOT: s.is_ot, otId: s.ot_id
+            ...s,
+            empId: s.emp_id,
+            breakMin: s.break_min,
+            paidBreakMin: s.paid_break_min,
+            isOT: s.is_ot,
+            otId: s.ot_id,
+            otOriginalStart: s.ot_original_start,
+            otOriginalEnd: s.ot_original_end,
+            otAnnotations: s.ot_annotations || []
           }));
         } else if (k === 'leaveRequests') {
           CACHE['rx3_leaveRequests'] = data.map(l => ({
-            ...l, empId: l.emp_id, from: l.from_date, to: l.to_date
+            ...l,
+            empId: l.emp_id,
+            from: l.from || l.from_date,
+            to: l.to || l.to_date
           }));
         } else if (k === 'sickDays') {
           CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id }));
@@ -490,6 +602,8 @@ CACHE['rx3_clockEvents'] = [...mergedById.values()];
         } else {
           CACHE['rx3_' + k] = data;
         }
+
+        try { localStorage.setItem('rx3_' + k, JSON.stringify(CACHE['rx3_' + k])); } catch(e) {}
       });
       if (callback) callback();
     }).catch(() => { if (callback) callback(); });
@@ -1288,7 +1402,14 @@ async function clockRefresh() {
   if (icon) icon.style.transform = 'rotate(720deg)';
   _setSyncIndicator('loading');
   try {
-    await new Promise(resolve => DB.preload(ALL_KEYS, resolve));
+    // Do not reload clockEvents here. Staff use this button during the day
+    // to pull updated roster/supporting data only; active clock status is kept
+    // from the local clock cache/outbox so it cannot be wiped by a stale server response.
+    await outbox_flush();
+    await new Promise(resolve => DB.refresh(
+      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays', 'otRequests'],
+      resolve
+    ));
     renderGrid();
     _setSyncIndicator('saved');
     if (ind) {
