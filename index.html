@@ -317,8 +317,10 @@ function _normaliseClockEvent(e) {
 
   const ts = e.ts || e.timestamp || e.created_at || e.createdAt || null;
   const type = String(e.type || '').trim();
-  const empId = e.emp_id || e.empId;
-  const shiftId = e.shift_id || e.shiftId || null;
+  const rawEmpId = e.emp_id ?? e.empId;
+  const rawShiftId = e.shift_id ?? e.shiftId ?? null;
+  const empId = rawEmpId === null || rawEmpId === undefined ? null : String(rawEmpId);
+  const shiftId = rawShiftId === null || rawShiftId === undefined ? null : String(rawShiftId);
   const photoUrl = e.photo_url || e.photoUrl || null;
 
   return {
@@ -488,6 +490,7 @@ preload(keys, callback) {
 
     CACHE['rx3_staff'] = (staff.data || []).map(r => ({
       ...r,
+      id: String(r.id),
       availNotes: r.avail_notes,
       contractStart: r.contract_start,
       contractEnd: r.contract_end,
@@ -500,7 +503,8 @@ preload(keys, callback) {
 
     CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
       ...s,
-      empId: s.emp_id,
+      id: String(s.id),
+      empId: s.emp_id === null || s.emp_id === undefined ? null : String(s.emp_id),
       breakMin: s.break_min,
       paidBreakMin: s.paid_break_min,
       isOT: s.is_ot,
@@ -519,17 +523,17 @@ const localClockEvents = [
 _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClockEvents));
     CACHE['rx3_leaveRequests'] = (leaveRequests.data || []).map(l => ({
       ...l,
-      empId: l.emp_id
+      empId: l.emp_id === null || l.emp_id === undefined ? null : String(l.emp_id)
     }));
 
     CACHE['rx3_sickDays'] = (sickDays.data || []).map(s => ({
       ...s,
-      empId: s.emp_id
+      empId: s.emp_id === null || s.emp_id === undefined ? null : String(s.emp_id)
     }));
 
     CACHE['rx3_otRequests'] = (otRequests.data || []).map(o => ({
       ...o,
-      empId: o.emp_id
+      empId: o.emp_id === null || o.emp_id === undefined ? null : String(o.emp_id)
     }));
 
     CACHE['rx3_settings'] = settings.data?.[0]?.value || {};
@@ -596,7 +600,7 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             to: l.to || l.to_date
           }));
         } else if (k === 'sickDays') {
-          CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id }));
+          CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id === null || s.emp_id === undefined ? null : String(s.emp_id) }));
         } else if (k === 'settings') {
           CACHE['rx3_settings'] = data[0]?.value || {};
         } else {
@@ -742,6 +746,25 @@ function calcBreakState(sortedEvents){
     activeBreak
   };
 }
+
+function getTodayClockState(allEvents, empId, date) {
+  const targetEmpId = String(empId);
+  const events = (allEvents || [])
+    .map(_normaliseClockEvent)
+    .filter(e => e && String(e.empId) === targetEmpId && e.date === date)
+    .sort((a, b) => _clockEventSortValue(a) - _clockEventSortValue(b));
+
+  const last = events[events.length - 1] || null;
+  return {
+    events,
+    last,
+    clockIn: events.find(e => e.type === 'clock-in') || null,
+    clockOut: last?.type === 'clock-out' ? last : null,
+    isClockedIn: !!last && last.type !== 'clock-out',
+    onBreak: !!last && last.type === 'break-start'
+  };
+}
+
 function renderGrid(){
   const all=[...(DB.get("staff")||[])].sort((a,b)=>a.first.localeCompare(b.first)||a.last.localeCompare(b.last));
   const q=(document.getElementById("staff-search").value||"").toLowerCase().trim();
@@ -756,9 +779,10 @@ function renderGrid(){
     const todayShift=todayShifts.find(s=>s.empId===emp.id);
     const isSick=sickDays.find(s=>s.empId===emp.id&&s.date===today);
     const isLeave=leaveReqs.find(l=>l.empId===emp.id&&l.from<=today&&l.to>=today);
-    const ci=ce.find(e=>e.empId===emp.id&&e.date===today&&e.type==="clock-in");
-    const co=ce.find(e=>e.empId===emp.id&&e.date===today&&e.type==="clock-out");
-    const empCe=ce.filter(e=>e.empId===emp.id&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
+    const clockState=getTodayClockState(ce,emp.id,today);
+    const ci=clockState.clockIn;
+    const co=clockState.clockOut;
+    const empCe=clockState.events;
     const {onBreak:onBreak,usedMins:usedBrk}=calcBreakState(empCe);
     const col=ROLE_COLORS[emp.role]||"#534AB7";
     const nowT=new Date().toTimeString().slice(0,5);
@@ -807,9 +831,10 @@ function renderActionScreen(){
   const todayShift=shifts.find(s=>s.empId===currentEmp.id&&s.date===today&&s.published);
   const isSick=sickDays.find(s=>s.empId===currentEmp.id&&s.date===today);
   const isLeave=leaveReqs.find(l=>l.empId===currentEmp.id&&l.from<=today&&l.to>=today);
-  const ci=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="clock-in");
-  const co=ce.find(e=>e.empId===currentEmp.id&&e.date===today&&e.type==="clock-out");
-  const empCe2=ce.filter(e=>e.empId===currentEmp.id&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
+  const clockState2=getTodayClockState(ce,currentEmp.id,today);
+  const ci=clockState2.clockIn;
+  const co=clockState2.clockOut;
+  const empCe2=clockState2.events;
   const {onBreak:onBreak,sessions:breakSessions2,usedMins:usedBreakMins2,activeBreak:activeBreak2}=calcBreakState(empCe2);
   currentShiftId=todayShift?.id||null;
   const nowTA=new Date().toTimeString().slice(0,5);
@@ -1043,8 +1068,7 @@ async function confirmClock(){
 
   // Update display cache
   const localEvents=(CACHE['rx3_clockEvents']||DB.get('clockEvents')||[]).concat([localEvent]);
-  CACHE['rx3_clockEvents']=localEvents;
-  try{localStorage.setItem('rx3_clockEvents',JSON.stringify(localEvents));}catch(e){}
+  _cacheClockEvents(localEvents);
 
 // ── Step 2: Save clock event to Supabase immediately ─────
 const { error } = await supabaseClient2
@@ -1065,6 +1089,12 @@ const { error } = await supabaseClient2
   }, { onConflict: 'id' });
 
 if (error) throw error;
+
+// Mark the locally cached copy as synced without removing it. The cache remains
+// authoritative for the current day so a page refresh cannot blank active status.
+_cacheClockEvents((DB.get('clockEvents') || []).map(e =>
+  e.id === serverEvent.id ? { ...e, synced: true } : e
+));
 
 // ── Step 3: Keep photo/outbox as secondary backup ────────
 outbox_add(serverEvent, photo);
