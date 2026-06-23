@@ -560,6 +560,7 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
     } catch(e) {}
 
     _setSyncIndicator('saved');
+    startShiftRealtimeSync();
     if (callback) callback();
   }).catch(err => {
     console.error('Clock preload failed:', err);
@@ -584,7 +585,12 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
       return table ? supabaseClient2.from(table).select('*') : Promise.resolve({ data: [] });
     })).then(results => {
       safeKeys.forEach((k, i) => {
-        const data = results[i].data || [];
+        const result = results[i] || {};
+        if (result.error) {
+          console.warn('Clock refresh skipped for ' + k + ':', result.error.message);
+          return; // Preserve the last known-good cache instead of replacing it with an empty array.
+        }
+        const data = result.data || [];
         if (k === 'staff') {
           CACHE['rx3_staff'] = data.map(r => ({
             ...r,
@@ -600,7 +606,12 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
         } else if (k === 'shifts') {
           CACHE['rx3_shifts'] = data.map(s => ({
             ...s,
-            empId: s.emp_id,
+            id: _id(s.id),
+            empId: _id(s.emp_id ?? s.empId),
+            date: _cleanDate(s.date),
+            start: _cleanTime(s.start),
+            end: _cleanTime(s.end),
+            published: _published(s),
             breakMin: s.break_min,
             paidBreakMin: s.paid_break_min,
             isOT: s.is_ot,
@@ -630,6 +641,51 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
     }).catch(() => { if (callback) callback(); });
   }
 };
+
+
+let _shiftRealtimeChannel = null;
+function startShiftRealtimeSync() {
+  if (_shiftRealtimeChannel) return;
+  _shiftRealtimeChannel = supabaseClient2
+    .channel('clock-shifts-live')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'shifts' },
+      async () => {
+        try {
+          const { data, error } = await supabaseClient2
+            .from('shifts')
+            .select('*')
+            .order('date', { ascending: true })
+            .order('start', { ascending: true });
+          if (error) throw error;
+
+          CACHE['rx3_shifts'] = (data || []).map(s => ({
+            ...s,
+            id: _id(s.id),
+            empId: _id(s.emp_id ?? s.empId),
+            date: _cleanDate(s.date),
+            start: _cleanTime(s.start),
+            end: _cleanTime(s.end),
+            published: _published(s),
+            breakMin: s.break_min,
+            paidBreakMin: s.paid_break_min,
+            isOT: s.is_ot,
+            otId: s.ot_id,
+            otOriginalStart: s.ot_original_start,
+            otOriginalEnd: s.ot_original_end,
+            otAnnotations: s.ot_annotations || []
+          }));
+
+          try { localStorage.setItem('rx3_shifts', JSON.stringify(CACHE['rx3_shifts'])); } catch(e) {}
+          renderHome();
+        } catch (e) {
+          console.warn('Clock realtime shift refresh failed:', e.message);
+        }
+      }
+    )
+    .subscribe();
+}
 
 function _setSyncIndicator(state) {
   const el = document.getElementById('sync-indicator');
