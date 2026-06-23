@@ -511,7 +511,9 @@ preload(keys, callback) {
       otId: s.ot_id,
       otOriginalStart: s.ot_original_start,
       otOriginalEnd: s.ot_original_end,
-      otAnnotations: s.ot_annotations || []
+      otAnnotations: s.ot_annotations || [],
+      published: s.published === true || s.published === 1 || String(s.published).toLowerCase() === 'true' || String(s.status || '').toLowerCase() === 'published',
+      status: String(s.status || '').toLowerCase() === 'published' ? 'published' : (s.status || (s.published ? 'published' : 'draft'))
     }));
 
 const serverClockEvents = clockEvents.data || [];
@@ -590,7 +592,9 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             otId: s.ot_id,
             otOriginalStart: s.ot_original_start,
             otOriginalEnd: s.ot_original_end,
-            otAnnotations: s.ot_annotations || []
+            otAnnotations: s.ot_annotations || [],
+            published: s.published === true || s.published === 1 || String(s.published).toLowerCase() === 'true' || String(s.status || '').toLowerCase() === 'published',
+            status: String(s.status || '').toLowerCase() === 'published' ? 'published' : (s.status || (s.published ? 'published' : 'draft'))
           }));
         } else if (k === 'leaveRequests') {
           CACHE['rx3_leaveRequests'] = data.map(l => ({
@@ -645,6 +649,12 @@ function FD(d){if(!(d instanceof Date))return d;const y=d.getFullYear();const m=
 function INI(e){return(e.first[0]+e.last[0]).toUpperCase()}
 function TODAY(){return FD(new Date())}
 function NOWT(){return new Date().toTimeString().slice(0,5)}
+function isPublishedClockShift(s){
+  if(!s) return false;
+  if(s.published === true || s.published === 1) return true;
+  if(typeof s.published === 'string' && s.published.toLowerCase() === 'true') return true;
+  return String(s.status || '').toLowerCase() === 'published';
+}
 function MD(a,b){if(!a||!b)return null;const[ah,am]=a.split(":").map(Number);const[bh,bm]=b.split(":").map(Number);return(bh*60+bm)-(ah*60+am);}
 function SS(id){
   const isModal=document.getElementById(id)&&document.getElementById(id).classList.contains("modal-overlay-dk");
@@ -771,12 +781,12 @@ function renderGrid(){
   const staff=q?all.filter(s=>`${s.first} ${s.last}`.toLowerCase().includes(q)):all;
   const today=TODAY();const shifts=DB.get("shifts")||[];const ce=DB.get("clockEvents")||[];
   const sickDays=DB.get("sickDays")||[];const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
-  const todayShifts=shifts.filter(s=>s.date===today&&s.published);
+  const todayShifts=shifts.filter(s=>s.date===today&&isPublishedClockShift(s));
   document.getElementById("shift-count").textContent=`${todayShifts.length} shift${todayShifts.length!==1?"s":""} today`;
   document.getElementById("today-bar").textContent=new Date().toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
   const grid=document.getElementById("staff-grid");grid.innerHTML="";
   staff.forEach(emp=>{
-    const todayShift=todayShifts.find(s=>s.empId===emp.id);
+    const todayShift=todayShifts.find(s=>String(s.empId)===String(emp.id));
     const isSick=sickDays.find(s=>s.empId===emp.id&&s.date===today);
     const isLeave=leaveReqs.find(l=>l.empId===emp.id&&l.from<=today&&l.to>=today);
     const clockState=getTodayClockState(ce,emp.id,today);
@@ -828,7 +838,7 @@ function renderActionScreen(){
   document.getElementById("act-role").textContent=currentEmp.role;
   const today=TODAY();const shifts=DB.get("shifts")||[];const ce=DB.get("clockEvents")||[];
   const sickDays=DB.get("sickDays")||[];const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
-  const todayShift=shifts.find(s=>s.empId===currentEmp.id&&s.date===today&&s.published);
+  const todayShift=shifts.find(s=>String(s.empId)===String(currentEmp.id)&&s.date===today&&isPublishedClockShift(s));
   const isSick=sickDays.find(s=>s.empId===currentEmp.id&&s.date===today);
   const isLeave=leaveReqs.find(l=>l.empId===currentEmp.id&&l.from<=today&&l.to>=today);
   const clockState2=getTodayClockState(ce,currentEmp.id,today);
