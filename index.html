@@ -317,10 +317,8 @@ function _normaliseClockEvent(e) {
 
   const ts = e.ts || e.timestamp || e.created_at || e.createdAt || null;
   const type = String(e.type || '').trim();
-  const rawEmpId = e.emp_id ?? e.empId;
-  const rawShiftId = e.shift_id ?? e.shiftId ?? null;
-  const empId = rawEmpId === null || rawEmpId === undefined ? null : String(rawEmpId);
-  const shiftId = rawShiftId === null || rawShiftId === undefined ? null : String(rawShiftId);
+  const empId = e.emp_id || e.empId;
+  const shiftId = e.shift_id || e.shiftId || null;
   const photoUrl = e.photo_url || e.photoUrl || null;
 
   return {
@@ -433,6 +431,21 @@ async function _gasPost(body) {
   try { return JSON.parse(text); } catch(e) { return { ok: false, error: text }; }
 }
 
+
+function _id(value){ return String(value ?? '').trim(); }
+function _published(s){
+  const v=s?.published;
+  return v===true || v===1 || String(v).trim().toLowerCase()==='true' || String(s?.status||'').trim().toLowerCase()==='published';
+}
+function _cleanDate(v){
+  const m=String(v||'').match(/\d{4}-\d{2}-\d{2}/);
+  return m?m[0]:String(v||'');
+}
+function _cleanTime(v){
+  const m=String(v||'').match(/(\d{1,2}):(\d{2})/);
+  return m?String(m[1]).padStart(2,'0')+':'+m[2]:String(v||'');
+}
+
 const DB = {
   get(k) {
     const key = 'rx3_' + k;
@@ -478,7 +491,7 @@ preload(keys, callback) {
 
   Promise.all([
     supabaseClient2.from('staff').select('*'),
-    supabaseClient2.from('shifts').select('*'),
+    supabaseClient2.from('shifts').select('*').order('date', { ascending: true }).order('start', { ascending: true }),
     supabaseClient2.from('clock_events').select('*'),
     supabaseClient2.from('leave_requests').select('*'),
     supabaseClient2.from('sick_days').select('*'),
@@ -490,7 +503,7 @@ preload(keys, callback) {
 
     CACHE['rx3_staff'] = (staff.data || []).map(r => ({
       ...r,
-      id: String(r.id),
+      id: _id(r.id),
       availNotes: r.avail_notes,
       contractStart: r.contract_start,
       contractEnd: r.contract_end,
@@ -503,17 +516,19 @@ preload(keys, callback) {
 
     CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
       ...s,
-      id: String(s.id),
-      empId: s.emp_id === null || s.emp_id === undefined ? null : String(s.emp_id),
+      id: _id(s.id),
+      empId: _id(s.emp_id ?? s.empId),
+      date: _cleanDate(s.date),
+      start: _cleanTime(s.start),
+      end: _cleanTime(s.end),
+      published: _published(s),
       breakMin: s.break_min,
       paidBreakMin: s.paid_break_min,
       isOT: s.is_ot,
       otId: s.ot_id,
       otOriginalStart: s.ot_original_start,
       otOriginalEnd: s.ot_original_end,
-      otAnnotations: s.ot_annotations || [],
-      published: s.published === true || s.published === 1 || String(s.published).toLowerCase() === 'true' || String(s.status || '').toLowerCase() === 'published',
-      status: String(s.status || '').toLowerCase() === 'published' ? 'published' : (s.status || (s.published ? 'published' : 'draft'))
+      otAnnotations: s.ot_annotations || []
     }));
 
 const serverClockEvents = clockEvents.data || [];
@@ -525,17 +540,17 @@ const localClockEvents = [
 _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClockEvents));
     CACHE['rx3_leaveRequests'] = (leaveRequests.data || []).map(l => ({
       ...l,
-      empId: l.emp_id === null || l.emp_id === undefined ? null : String(l.emp_id)
+      empId: l.emp_id
     }));
 
     CACHE['rx3_sickDays'] = (sickDays.data || []).map(s => ({
       ...s,
-      empId: s.emp_id === null || s.emp_id === undefined ? null : String(s.emp_id)
+      empId: s.emp_id
     }));
 
     CACHE['rx3_otRequests'] = (otRequests.data || []).map(o => ({
       ...o,
-      empId: o.emp_id === null || o.emp_id === undefined ? null : String(o.emp_id)
+      empId: o.emp_id
     }));
 
     CACHE['rx3_settings'] = settings.data?.[0]?.value || {};
@@ -592,9 +607,7 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             otId: s.ot_id,
             otOriginalStart: s.ot_original_start,
             otOriginalEnd: s.ot_original_end,
-            otAnnotations: s.ot_annotations || [],
-            published: s.published === true || s.published === 1 || String(s.published).toLowerCase() === 'true' || String(s.status || '').toLowerCase() === 'published',
-            status: String(s.status || '').toLowerCase() === 'published' ? 'published' : (s.status || (s.published ? 'published' : 'draft'))
+            otAnnotations: s.ot_annotations || []
           }));
         } else if (k === 'leaveRequests') {
           CACHE['rx3_leaveRequests'] = data.map(l => ({
@@ -604,7 +617,7 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             to: l.to || l.to_date
           }));
         } else if (k === 'sickDays') {
-          CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id === null || s.emp_id === undefined ? null : String(s.emp_id) }));
+          CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id }));
         } else if (k === 'settings') {
           CACHE['rx3_settings'] = data[0]?.value || {};
         } else {
@@ -649,12 +662,6 @@ function FD(d){if(!(d instanceof Date))return d;const y=d.getFullYear();const m=
 function INI(e){return(e.first[0]+e.last[0]).toUpperCase()}
 function TODAY(){return FD(new Date())}
 function NOWT(){return new Date().toTimeString().slice(0,5)}
-function isPublishedClockShift(s){
-  if(!s) return false;
-  if(s.published === true || s.published === 1) return true;
-  if(typeof s.published === 'string' && s.published.toLowerCase() === 'true') return true;
-  return String(s.status || '').toLowerCase() === 'published';
-}
 function MD(a,b){if(!a||!b)return null;const[ah,am]=a.split(":").map(Number);const[bh,bm]=b.split(":").map(Number);return(bh*60+bm)-(ah*60+am);}
 function SS(id){
   const isModal=document.getElementById(id)&&document.getElementById(id).classList.contains("modal-overlay-dk");
@@ -756,43 +763,23 @@ function calcBreakState(sortedEvents){
     activeBreak
   };
 }
-
-function getTodayClockState(allEvents, empId, date) {
-  const targetEmpId = String(empId);
-  const events = (allEvents || [])
-    .map(_normaliseClockEvent)
-    .filter(e => e && String(e.empId) === targetEmpId && e.date === date)
-    .sort((a, b) => _clockEventSortValue(a) - _clockEventSortValue(b));
-
-  const last = events[events.length - 1] || null;
-  return {
-    events,
-    last,
-    clockIn: events.find(e => e.type === 'clock-in') || null,
-    clockOut: last?.type === 'clock-out' ? last : null,
-    isClockedIn: !!last && last.type !== 'clock-out',
-    onBreak: !!last && last.type === 'break-start'
-  };
-}
-
 function renderGrid(){
   const all=[...(DB.get("staff")||[])].sort((a,b)=>a.first.localeCompare(b.first)||a.last.localeCompare(b.last));
   const q=(document.getElementById("staff-search").value||"").toLowerCase().trim();
   const staff=q?all.filter(s=>`${s.first} ${s.last}`.toLowerCase().includes(q)):all;
   const today=TODAY();const shifts=DB.get("shifts")||[];const ce=DB.get("clockEvents")||[];
   const sickDays=DB.get("sickDays")||[];const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
-  const todayShifts=shifts.filter(s=>s.date===today&&isPublishedClockShift(s));
+  const todayShifts=shifts.filter(s=>_cleanDate(s.date)===today&&_published(s));
   document.getElementById("shift-count").textContent=`${todayShifts.length} shift${todayShifts.length!==1?"s":""} today`;
   document.getElementById("today-bar").textContent=new Date().toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
   const grid=document.getElementById("staff-grid");grid.innerHTML="";
   staff.forEach(emp=>{
-    const todayShift=todayShifts.find(s=>String(s.empId)===String(emp.id));
-    const isSick=sickDays.find(s=>s.empId===emp.id&&s.date===today);
-    const isLeave=leaveReqs.find(l=>l.empId===emp.id&&l.from<=today&&l.to>=today);
-    const clockState=getTodayClockState(ce,emp.id,today);
-    const ci=clockState.clockIn;
-    const co=clockState.clockOut;
-    const empCe=clockState.events;
+    const todayShift=todayShifts.find(s=>_id(s.empId)===_id(emp.id));
+    const isSick=sickDays.find(s=>_id(s.empId)===_id(emp.id)&&s.date===today);
+    const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(emp.id)&&l.from<=today&&l.to>=today);
+    const ci=ce.find(e=>_id(e.empId)===_id(emp.id)&&e.date===today&&e.type==="clock-in");
+    const co=ce.find(e=>_id(e.empId)===_id(emp.id)&&e.date===today&&e.type==="clock-out");
+    const empCe=ce.filter(e=>_id(e.empId)===_id(emp.id)&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
     const {onBreak:onBreak,usedMins:usedBrk}=calcBreakState(empCe);
     const col=ROLE_COLORS[emp.role]||"#534AB7";
     const nowT=new Date().toTimeString().slice(0,5);
@@ -824,7 +811,7 @@ function selectEmp(empId){
   // Always reset to the action panel (not clock or success from last session)
   showModalPanel("pin-panel");
   const staff=DB.get("staff")||[];
-  currentEmp=staff.find(s=>s.id===empId);
+  currentEmp=staff.find(s=>_id(s.id)===_id(empId));
   if(!currentEmp)return;
   renderActionScreen();
   SS("screen-action");
@@ -838,13 +825,12 @@ function renderActionScreen(){
   document.getElementById("act-role").textContent=currentEmp.role;
   const today=TODAY();const shifts=DB.get("shifts")||[];const ce=DB.get("clockEvents")||[];
   const sickDays=DB.get("sickDays")||[];const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
-  const todayShift=shifts.find(s=>String(s.empId)===String(currentEmp.id)&&s.date===today&&isPublishedClockShift(s));
-  const isSick=sickDays.find(s=>s.empId===currentEmp.id&&s.date===today);
-  const isLeave=leaveReqs.find(l=>l.empId===currentEmp.id&&l.from<=today&&l.to>=today);
-  const clockState2=getTodayClockState(ce,currentEmp.id,today);
-  const ci=clockState2.clockIn;
-  const co=clockState2.clockOut;
-  const empCe2=clockState2.events;
+  const todayShift=shifts.find(s=>_id(s.empId)===_id(currentEmp.id)&&_cleanDate(s.date)===today&&_published(s));
+  const isSick=sickDays.find(s=>_id(s.empId)===_id(currentEmp.id)&&s.date===today);
+  const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(currentEmp.id)&&l.from<=today&&l.to>=today);
+  const ci=ce.find(e=>_id(e.empId)===_id(currentEmp.id)&&e.date===today&&e.type==="clock-in");
+  const co=ce.find(e=>_id(e.empId)===_id(currentEmp.id)&&e.date===today&&e.type==="clock-out");
+  const empCe2=ce.filter(e=>_id(e.empId)===_id(currentEmp.id)&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
   const {onBreak:onBreak,sessions:breakSessions2,usedMins:usedBreakMins2,activeBreak:activeBreak2}=calcBreakState(empCe2);
   currentShiftId=todayShift?.id||null;
   const nowTA=new Date().toTimeString().slice(0,5);
@@ -1078,7 +1064,8 @@ async function confirmClock(){
 
   // Update display cache
   const localEvents=(CACHE['rx3_clockEvents']||DB.get('clockEvents')||[]).concat([localEvent]);
-  _cacheClockEvents(localEvents);
+  CACHE['rx3_clockEvents']=localEvents;
+  try{localStorage.setItem('rx3_clockEvents',JSON.stringify(localEvents));}catch(e){}
 
 // ── Step 2: Save clock event to Supabase immediately ─────
 const { error } = await supabaseClient2
@@ -1099,12 +1086,6 @@ const { error } = await supabaseClient2
   }, { onConflict: 'id' });
 
 if (error) throw error;
-
-// Mark the locally cached copy as synced without removing it. The cache remains
-// authoritative for the current day so a page refresh cannot blank active status.
-_cacheClockEvents((DB.get('clockEvents') || []).map(e =>
-  e.id === serverEvent.id ? { ...e, synced: true } : e
-));
 
 // ── Step 3: Keep photo/outbox as secondary backup ────────
 outbox_add(serverEvent, photo);
