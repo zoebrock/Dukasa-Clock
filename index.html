@@ -300,7 +300,7 @@ const supabaseClient2 = window.supabase.createClient(
 //  Never overwrite local clockEvents with stale server data.
 // ═══════════════════════════════════════════════════════
 const PROXY = '/api/gas';
-const CLOCK_VERSION = '2.3'; // preserve active clock status during roster refresh
+const CLOCK_VERSION = '2.4'; // preserve shifts and active clock status across reloads
 const CACHE = {};
 const DIRTY = {};
 
@@ -411,6 +411,27 @@ function _cacheClockEvents(events) {
   _writeStoredClockEvents(CACHE['rx3_clockEvents']);
 }
 
+function _readCachedArray(key) {
+  const inMemory = CACHE[key];
+  if (Array.isArray(inMemory) && inMemory.length) return inMemory;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(e) {
+    return [];
+  }
+}
+
+function _keepLastKnownRows(key, serverRows, label) {
+  const incoming = Array.isArray(serverRows) ? serverRows : [];
+  const cached = _readCachedArray(key);
+  if (incoming.length === 0 && cached.length > 0) {
+    console.warn(`[CLOCK] Empty ${label || key} response ignored; preserving ${cached.length} cached row(s).`);
+    return cached;
+  }
+  return incoming;
+}
+
 
 async function _gasGet(action, params = {}) {
   const url = new URL(PROXY, window.location.origin);
@@ -501,7 +522,10 @@ preload(keys, callback) {
     if (staff.error) console.error('Staff load error:', staff.error);
     if (shifts.error) console.error('Shifts load error:', shifts.error);
 
-    CACHE['rx3_staff'] = (staff.data || []).map(r => ({
+    const safeStaffRows = staff.error ? _readCachedArray('rx3_staff') : _keepLastKnownRows('rx3_staff', staff.data, 'staff');
+    const safeShiftRows = shifts.error ? _readCachedArray('rx3_shifts') : _keepLastKnownRows('rx3_shifts', shifts.data, 'shifts');
+
+    CACHE['rx3_staff'] = safeStaffRows.map(r => ({
       ...r,
       id: _id(r.id),
       availNotes: r.avail_notes,
@@ -514,7 +538,7 @@ preload(keys, callback) {
       autoShift: r.auto_shift
     }));
 
-    CACHE['rx3_shifts'] = (shifts.data || []).map(s => ({
+    CACHE['rx3_shifts'] = safeShiftRows.map(s => ({
       ...s,
       id: _id(s.id),
       empId: _id(s.emp_id ?? s.empId),
@@ -564,6 +588,9 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
     if (callback) callback();
   }).catch(err => {
     console.error('Clock preload failed:', err);
+    // DB.get() will hydrate CACHE from localStorage, allowing the last known
+    // roster and same-day clock events to remain visible while offline.
+    ['staff','shifts','clockEvents','leaveRequests','sickDays','otRequests','settings'].forEach(k => DB.get(k));
     _setSyncIndicator('error');
     if (callback) callback();
   });
@@ -590,7 +617,14 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
           console.warn('Clock refresh skipped for ' + k + ':', result.error.message);
           return; // Preserve the last known-good cache instead of replacing it with an empty array.
         }
-        const data = result.data || [];
+        let data = result.data || [];
+        if ((k === 'staff' || k === 'shifts') && data.length === 0) {
+          const cachedRows = _readCachedArray('rx3_' + k);
+          if (cachedRows.length) {
+            console.warn('[CLOCK] Empty refresh for ' + k + ' ignored; preserving ' + cachedRows.length + ' cached row(s).');
+            return;
+          }
+        }
         if (k === 'staff') {
           CACHE['rx3_staff'] = data.map(r => ({
             ...r,
@@ -660,7 +694,13 @@ function startShiftRealtimeSync() {
             .order('start', { ascending: true });
           if (error) throw error;
 
-          CACHE['rx3_shifts'] = (data || []).map(s => ({
+          const incomingShifts = data || [];
+          if (incomingShifts.length === 0 && _readCachedArray('rx3_shifts').length > 0) {
+            console.warn('[CLOCK] Empty realtime shift response ignored; preserving cached roster.');
+            return;
+          }
+
+          CACHE['rx3_shifts'] = incomingShifts.map(s => ({
             ...s,
             id: _id(s.id),
             empId: _id(s.emp_id ?? s.empId),
