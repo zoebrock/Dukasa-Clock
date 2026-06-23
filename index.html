@@ -300,7 +300,7 @@ const supabaseClient2 = window.supabase.createClient(
 //  Never overwrite local clockEvents with stale server data.
 // ═══════════════════════════════════════════════════════
 const PROXY = '/api/gas';
-const CLOCK_VERSION = '2.4'; // preserve shifts and active clock status across reloads
+const CLOCK_VERSION = '2.5'; // merge shifts safely and preserve active clock status across reloads
 const CACHE = {};
 const DIRTY = {};
 
@@ -432,6 +432,51 @@ function _keepLastKnownRows(key, serverRows, label) {
   return incoming;
 }
 
+function _normaliseShiftRow(s) {
+  if (!s) return null;
+  const empId = _id(s.emp_id ?? s.empId ?? s.staff_id ?? s.staffId ?? s.employee_id ?? s.employeeId);
+  return {
+    ...s,
+    id: _id(s.id),
+    empId,
+    emp_id: s.emp_id ?? empId,
+    date: _cleanDate(s.date ?? s.shift_date ?? s.shiftDate),
+    start: _cleanTime(s.start ?? s.start_time ?? s.startTime),
+    end: _cleanTime(s.end ?? s.end_time ?? s.endTime),
+    published: _published(s),
+    breakMin: s.break_min ?? s.breakMin,
+    paidBreakMin: s.paid_break_min ?? s.paidBreakMin,
+    isOT: s.is_ot ?? s.isOT,
+    otId: s.ot_id ?? s.otId,
+    otOriginalStart: s.ot_original_start ?? s.otOriginalStart,
+    otOriginalEnd: s.ot_original_end ?? s.otOriginalEnd,
+    otAnnotations: s.ot_annotations || s.otAnnotations || []
+  };
+}
+
+function _shiftStableKey(s) {
+  const n = _normaliseShiftRow(s);
+  if (!n) return '';
+  return n.id || [n.empId, n.date, n.start, n.end].join('|');
+}
+
+function _mergeShiftsPreservingToday(serverRows, cachedRows) {
+  const today = _clockTodayString();
+  const merged = new Map();
+  (serverRows || []).map(_normaliseShiftRow).filter(Boolean).forEach(s => {
+    const key = _shiftStableKey(s);
+    if (key) merged.set(key, s);
+  });
+  (cachedRows || []).map(_normaliseShiftRow).filter(Boolean).forEach(local => {
+    const key = _shiftStableKey(local);
+    if (!key) return;
+    // Supabase queries can briefly return a partial roster after publish/update.
+    // Keep today's last-known published shift unless a realtime DELETE explicitly removes it.
+    if (!merged.has(key) && local.date === today && _published(local)) merged.set(key, local);
+  });
+  return [...merged.values()].sort((a,b) => String(a.date).localeCompare(String(b.date)) || String(a.start).localeCompare(String(b.start)));
+}
+
 
 async function _gasGet(action, params = {}) {
   const url = new URL(PROXY, window.location.origin);
@@ -523,7 +568,10 @@ preload(keys, callback) {
     if (shifts.error) console.error('Shifts load error:', shifts.error);
 
     const safeStaffRows = staff.error ? _readCachedArray('rx3_staff') : _keepLastKnownRows('rx3_staff', staff.data, 'staff');
-    const safeShiftRows = shifts.error ? _readCachedArray('rx3_shifts') : _keepLastKnownRows('rx3_shifts', shifts.data, 'shifts');
+    const cachedShiftRows = _readCachedArray('rx3_shifts');
+    const safeShiftRows = shifts.error
+      ? cachedShiftRows
+      : _mergeShiftsPreservingToday(shifts.data || [], cachedShiftRows);
 
     CACHE['rx3_staff'] = safeStaffRows.map(r => ({
       ...r,
@@ -538,22 +586,7 @@ preload(keys, callback) {
       autoShift: r.auto_shift
     }));
 
-    CACHE['rx3_shifts'] = safeShiftRows.map(s => ({
-      ...s,
-      id: _id(s.id),
-      empId: _id(s.emp_id ?? s.empId),
-      date: _cleanDate(s.date),
-      start: _cleanTime(s.start),
-      end: _cleanTime(s.end),
-      published: _published(s),
-      breakMin: s.break_min,
-      paidBreakMin: s.paid_break_min,
-      isOT: s.is_ot,
-      otId: s.ot_id,
-      otOriginalStart: s.ot_original_start,
-      otOriginalEnd: s.ot_original_end,
-      otAnnotations: s.ot_annotations || []
-    }));
+    CACHE['rx3_shifts'] = safeShiftRows.map(_normaliseShiftRow).filter(Boolean);
 
 const serverClockEvents = clockEvents.data || [];
 const localClockEvents = [
@@ -638,22 +671,7 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             autoShift: r.auto_shift
           }));
         } else if (k === 'shifts') {
-          CACHE['rx3_shifts'] = data.map(s => ({
-            ...s,
-            id: _id(s.id),
-            empId: _id(s.emp_id ?? s.empId),
-            date: _cleanDate(s.date),
-            start: _cleanTime(s.start),
-            end: _cleanTime(s.end),
-            published: _published(s),
-            breakMin: s.break_min,
-            paidBreakMin: s.paid_break_min,
-            isOT: s.is_ot,
-            otId: s.ot_id,
-            otOriginalStart: s.ot_original_start,
-            otOriginalEnd: s.ot_original_end,
-            otAnnotations: s.ot_annotations || []
-          }));
+          CACHE['rx3_shifts'] = _mergeShiftsPreservingToday(data, _readCachedArray('rx3_shifts'));
         } else if (k === 'leaveRequests') {
           CACHE['rx3_leaveRequests'] = data.map(l => ({
             ...l,
@@ -700,25 +718,10 @@ function startShiftRealtimeSync() {
             return;
           }
 
-          CACHE['rx3_shifts'] = incomingShifts.map(s => ({
-            ...s,
-            id: _id(s.id),
-            empId: _id(s.emp_id ?? s.empId),
-            date: _cleanDate(s.date),
-            start: _cleanTime(s.start),
-            end: _cleanTime(s.end),
-            published: _published(s),
-            breakMin: s.break_min,
-            paidBreakMin: s.paid_break_min,
-            isOT: s.is_ot,
-            otId: s.ot_id,
-            otOriginalStart: s.ot_original_start,
-            otOriginalEnd: s.ot_original_end,
-            otAnnotations: s.ot_annotations || []
-          }));
+          CACHE['rx3_shifts'] = _mergeShiftsPreservingToday(incomingShifts, _readCachedArray('rx3_shifts'));
 
           try { localStorage.setItem('rx3_shifts', JSON.stringify(CACHE['rx3_shifts'])); } catch(e) {}
-          renderHome();
+          renderGrid();
         } catch (e) {
           console.warn('Clock realtime shift refresh failed:', e.message);
         }
