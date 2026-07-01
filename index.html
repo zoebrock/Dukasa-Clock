@@ -477,6 +477,38 @@ function _mergeShiftsPreservingToday(serverRows, cachedRows) {
   return [...merged.values()].sort((a,b) => String(a.date).localeCompare(String(b.date)) || String(a.start).localeCompare(String(b.start)));
 }
 
+// Fold legacy standalone OT rows into the employee's ordinary published shift.
+// This makes the clock deterministic even before old duplicate rows are cleaned.
+function _canonicalClockShifts(rows) {
+  const list = (rows || []).map(_normaliseShiftRow).filter(Boolean);
+  const bases = new Map();
+  list.forEach(s => {
+    if (s.isOT || !s.empId || !s.date) return;
+    const key = s.empId + '|' + s.date;
+    const cur = bases.get(key);
+    if (!cur || (_published(s) && !_published(cur))) bases.set(key, s);
+  });
+  const consumed = new Set();
+  const result = list.map(s => {
+    if (s.isOT) return s;
+    const key = s.empId + '|' + s.date;
+    if (bases.get(key)?.id !== s.id) return s;
+    let start = s.start, end = s.end;
+    const annotations = Array.isArray(s.otAnnotations) ? [...s.otAnnotations] : [];
+    list.forEach(o => {
+      if (!o.isOT || !_published(o) || o.empId !== s.empId || o.date !== s.date) return;
+      consumed.add(o.id);
+      if (o.start && (!start || o.start < start)) start = o.start;
+      if (o.end && (!end || o.end > end)) end = o.end;
+      if (o.otId && !annotations.some(a => String(a.otId) === String(o.otId))) {
+        annotations.push({ otId:o.otId, start:o.start, end:o.end, reason:o.notes || '' });
+      }
+    });
+    return { ...s, start, end, otAnnotations: annotations };
+  });
+  return result.filter(s => !consumed.has(s.id));
+}
+
 
 async function _gasGet(action, params = {}) {
   const url = new URL(PROXY, window.location.origin);
@@ -586,7 +618,7 @@ preload(keys, callback) {
       autoShift: r.auto_shift
     }));
 
-    CACHE['rx3_shifts'] = safeShiftRows.map(_normaliseShiftRow).filter(Boolean);
+    CACHE['rx3_shifts'] = _canonicalClockShifts(safeShiftRows);
 
 const serverClockEvents = clockEvents.data || [];
 const localClockEvents = [
@@ -671,7 +703,7 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             autoShift: r.auto_shift
           }));
         } else if (k === 'shifts') {
-          CACHE['rx3_shifts'] = _mergeShiftsPreservingToday(data, _readCachedArray('rx3_shifts'));
+          CACHE['rx3_shifts'] = _canonicalClockShifts(_mergeShiftsPreservingToday(data, _readCachedArray('rx3_shifts')));
         } else if (k === 'leaveRequests') {
           CACHE['rx3_leaveRequests'] = data.map(l => ({
             ...l,
@@ -718,7 +750,7 @@ function startShiftRealtimeSync() {
             return;
           }
 
-          CACHE['rx3_shifts'] = _mergeShiftsPreservingToday(incomingShifts, _readCachedArray('rx3_shifts'));
+          CACHE['rx3_shifts'] = _canonicalClockShifts(_mergeShiftsPreservingToday(incomingShifts, _readCachedArray('rx3_shifts')));
 
           try { localStorage.setItem('rx3_shifts', JSON.stringify(CACHE['rx3_shifts'])); } catch(e) {}
           renderGrid();
