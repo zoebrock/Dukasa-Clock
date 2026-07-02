@@ -300,7 +300,7 @@ const supabaseClient2 = window.supabase.createClient(
 //  Never overwrite local clockEvents with stale server data.
 // ═══════════════════════════════════════════════════════
 const PROXY = '/api/gas';
-const CLOCK_VERSION = '2.5'; // merge shifts safely and preserve active clock status across reloads
+const CLOCK_VERSION = '2.6'; // date-scoped live sync and event-sequence-safe clock status
 const CACHE = {};
 const DIRTY = {};
 
@@ -589,8 +589,8 @@ preload(keys, callback) {
 
   Promise.all([
     supabaseClient2.from('staff').select('*'),
-    supabaseClient2.from('shifts').select('*').order('date', { ascending: true }).order('start', { ascending: true }),
-    supabaseClient2.from('clock_events').select('*'),
+    supabaseClient2.from('shifts').select('*').eq('date', _clockTodayString()).order('start', { ascending: true }),
+    supabaseClient2.from('clock_events').select('*').eq('date', _clockTodayString()).order('ts', { ascending: true }),
     supabaseClient2.from('leave_requests').select('*'),
     supabaseClient2.from('sick_days').select('*'),
     supabaseClient2.from('ot_requests').select('*'),
@@ -601,9 +601,11 @@ preload(keys, callback) {
 
     const safeStaffRows = staff.error ? _readCachedArray('rx3_staff') : _keepLastKnownRows('rx3_staff', staff.data, 'staff');
     const cachedShiftRows = _readCachedArray('rx3_shifts');
+    // A successful date-scoped query is authoritative, including a valid empty day.
+    // Only fall back to cached rows when the query itself fails.
     const safeShiftRows = shifts.error
-      ? cachedShiftRows
-      : _mergeShiftsPreservingToday(shifts.data || [], cachedShiftRows);
+      ? cachedShiftRows.filter(s => _cleanDate(s.date) === _clockTodayString())
+      : (shifts.data || []);
 
     CACHE['rx3_staff'] = safeStaffRows.map(r => ({
       ...r,
@@ -662,37 +664,40 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
 },
 
   refresh(keys, callback) {
-    const safeKeys = keys.filter(k => k !== 'clockEvents');
+    const safeKeys = [...new Set(keys)];
     if (!safeKeys.length) { if (callback) callback(); return; }
     const tableMap = {
       staff: 'staff',
       shifts: 'shifts',
+      clockEvents: 'clock_events',
       leaveRequests: 'leave_requests',
       sickDays: 'sick_days',
       otRequests: 'ot_requests',
       settings: 'settings'
     };
+    const today = _clockTodayString();
     Promise.all(safeKeys.map(k => {
       const table = tableMap[k];
-      return table ? supabaseClient2.from(table).select('*') : Promise.resolve({ data: [] });
+      if (!table) return Promise.resolve({ data: [] });
+      let query = supabaseClient2.from(table).select('*');
+      if (k === 'shifts') query = query.eq('date', today).order('start', { ascending: true });
+      if (k === 'clockEvents') query = query.eq('date', today).order('ts', { ascending: true });
+      return query;
     })).then(results => {
       safeKeys.forEach((k, i) => {
         const result = results[i] || {};
         if (result.error) {
           console.warn('Clock refresh skipped for ' + k + ':', result.error.message);
-          return; // Preserve the last known-good cache instead of replacing it with an empty array.
+          return;
         }
-        let data = result.data || [];
-        if ((k === 'staff' || k === 'shifts') && data.length === 0) {
-          const cachedRows = _readCachedArray('rx3_' + k);
-          if (cachedRows.length) {
-            console.warn('[CLOCK] Empty refresh for ' + k + ' ignored; preserving ' + cachedRows.length + ' cached row(s).');
-            return;
-          }
-        }
+        const data = result.data || [];
         if (k === 'staff') {
+          // Staff can legitimately be empty only in a broken/unauthorised response;
+          // preserve the known list in that exceptional case.
+          if (!data.length && _readCachedArray('rx3_staff').length) return;
           CACHE['rx3_staff'] = data.map(r => ({
             ...r,
+            id: _id(r.id),
             availNotes: r.avail_notes,
             contractStart: r.contract_start,
             contractEnd: r.contract_end,
@@ -703,7 +708,16 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
             autoShift: r.auto_shift
           }));
         } else if (k === 'shifts') {
-          CACHE['rx3_shifts'] = _canonicalClockShifts(_mergeShiftsPreservingToday(data, _readCachedArray('rx3_shifts')));
+          // The date-filtered server response is authoritative. Do not merge stale
+          // same-day rows back in, because deleted/unpublished shifts must disappear.
+          CACHE['rx3_shifts'] = _canonicalClockShifts(data);
+        } else if (k === 'clockEvents') {
+          const localClockEvents = [
+            ..._readStoredClockEvents(),
+            ...(CACHE['rx3_clockEvents'] || []),
+            ...outbox_get().map(i => i.event)
+          ];
+          _cacheClockEvents(_mergeClockEventsPreservingLocal(data, localClockEvents));
         } else if (k === 'leaveRequests') {
           CACHE['rx3_leaveRequests'] = data.map(l => ({
             ...l,
@@ -715,6 +729,8 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
           CACHE['rx3_sickDays'] = data.map(s => ({ ...s, empId: s.emp_id }));
         } else if (k === 'settings') {
           CACHE['rx3_settings'] = data[0]?.value || {};
+        } else if (k === 'otRequests') {
+          CACHE['rx3_otRequests'] = data.map(o => ({ ...o, empId: o.emp_id }));
         } else {
           CACHE['rx3_' + k] = data;
         }
@@ -722,7 +738,10 @@ _cacheClockEvents(_mergeClockEventsPreservingLocal(serverClockEvents, localClock
         try { localStorage.setItem('rx3_' + k, JSON.stringify(CACHE['rx3_' + k])); } catch(e) {}
       });
       if (callback) callback();
-    }).catch(() => { if (callback) callback(); });
+    }).catch(err => {
+      console.warn('Clock refresh failed:', err?.message || err);
+      if (callback) callback();
+    });
   }
 };
 
@@ -740,17 +759,12 @@ function startShiftRealtimeSync() {
           const { data, error } = await supabaseClient2
             .from('shifts')
             .select('*')
-            .order('date', { ascending: true })
+            .eq('date', _clockTodayString())
             .order('start', { ascending: true });
           if (error) throw error;
 
           const incomingShifts = data || [];
-          if (incomingShifts.length === 0 && _readCachedArray('rx3_shifts').length > 0) {
-            console.warn('[CLOCK] Empty realtime shift response ignored; preserving cached roster.');
-            return;
-          }
-
-          CACHE['rx3_shifts'] = _canonicalClockShifts(_mergeShiftsPreservingToday(incomingShifts, _readCachedArray('rx3_shifts')));
+          CACHE['rx3_shifts'] = _canonicalClockShifts(incomingShifts);
 
           try { localStorage.setItem('rx3_shifts', JSON.stringify(CACHE['rx3_shifts'])); } catch(e) {}
           renderGrid();
@@ -894,6 +908,36 @@ function calcBreakState(sortedEvents){
     activeBreak
   };
 }
+function getEmployeeDayState(events, empId, date) {
+  const sorted = (events || [])
+    .map(_normaliseClockEvent)
+    .filter(e => e && _id(e.empId) === _id(empId) && e.date === date)
+    .sort((a,b) => _clockEventSortValue(a) - _clockEventSortValue(b));
+
+  const last = sorted[sorted.length - 1] || null;
+  let activeClockIn = null;
+  let latestClockOut = null;
+
+  for (const e of sorted) {
+    if (e.type === 'clock-in') activeClockIn = e;
+    if (e.type === 'clock-out') {
+      latestClockOut = e;
+      activeClockIn = null;
+    }
+  }
+
+  const breakState = calcBreakState(sorted);
+  const isClockedIn = !!activeClockIn && last?.type !== 'clock-out';
+  return {
+    events: sorted,
+    last,
+    clockIn: activeClockIn,
+    clockOut: isClockedIn ? null : latestClockOut,
+    isClockedIn,
+    ...breakState
+  };
+}
+
 function renderGrid(){
   const all=[...(DB.get("staff")||[])].sort((a,b)=>a.first.localeCompare(b.first)||a.last.localeCompare(b.last));
   const q=(document.getElementById("staff-search").value||"").toLowerCase().trim();
@@ -908,10 +952,11 @@ function renderGrid(){
     const todayShift=todayShifts.find(s=>_id(s.empId)===_id(emp.id));
     const isSick=sickDays.find(s=>_id(s.empId)===_id(emp.id)&&s.date===today);
     const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(emp.id)&&l.from<=today&&l.to>=today);
-    const ci=ce.find(e=>_id(e.empId)===_id(emp.id)&&e.date===today&&e.type==="clock-in");
-    const co=ce.find(e=>_id(e.empId)===_id(emp.id)&&e.date===today&&e.type==="clock-out");
-    const empCe=ce.filter(e=>_id(e.empId)===_id(emp.id)&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
-    const {onBreak:onBreak,usedMins:usedBrk}=calcBreakState(empCe);
+    const dayState=getEmployeeDayState(ce,emp.id,today);
+    const ci=dayState.clockIn;
+    const co=dayState.clockOut;
+    const onBreak=dayState.isClockedIn&&dayState.onBreak;
+    const usedBrk=dayState.usedMins;
     const col=ROLE_COLORS[emp.role]||"#534AB7";
     const nowT=new Date().toTimeString().slice(0,5);
     // Treat as clocked-out if: marked sick, or past rostered end with no clock-out
@@ -959,10 +1004,13 @@ function renderActionScreen(){
   const todayShift=shifts.find(s=>_id(s.empId)===_id(currentEmp.id)&&_cleanDate(s.date)===today&&_published(s));
   const isSick=sickDays.find(s=>_id(s.empId)===_id(currentEmp.id)&&s.date===today);
   const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(currentEmp.id)&&l.from<=today&&l.to>=today);
-  const ci=ce.find(e=>_id(e.empId)===_id(currentEmp.id)&&e.date===today&&e.type==="clock-in");
-  const co=ce.find(e=>_id(e.empId)===_id(currentEmp.id)&&e.date===today&&e.type==="clock-out");
-  const empCe2=ce.filter(e=>_id(e.empId)===_id(currentEmp.id)&&e.date===today).sort((a,b)=>(a.ts||a.time||''). localeCompare(b.ts||b.time||''));
-  const {onBreak:onBreak,sessions:breakSessions2,usedMins:usedBreakMins2,activeBreak:activeBreak2}=calcBreakState(empCe2);
+  const dayState=getEmployeeDayState(ce,currentEmp.id,today);
+  const ci=dayState.clockIn;
+  const co=dayState.clockOut;
+  const onBreak=dayState.isClockedIn&&dayState.onBreak;
+  const breakSessions2=dayState.sessions;
+  const usedBreakMins2=dayState.usedMins;
+  const activeBreak2=dayState.activeBreak;
   currentShiftId=todayShift?.id||null;
   const nowTA=new Date().toTimeString().slice(0,5);
   const sb=document.getElementById("act-shift-info");
@@ -1017,7 +1065,7 @@ function renderActionScreen(){
       addBtn(btns,"clock-out","Clock out","abtn-out",false);
     }
   } else if(co) {
-    const dur=ci&&co?((MD(ci.time,co.time)-(bs&&be?MD(bs.time,be.time):todayShift?.breakMin||0))/60).toFixed(1):null;
+    const dur=ci&&co?((Math.max(0,MD(ci.time,co.time)-usedBreakMins2))/60).toFixed(1):null;
     btns.innerHTML=`<div class="complete-msg" style="background:var(--tl);border-color:var(--teal);color:var(--teal)">Shift complete${dur?" - "+dur+"h logged":""}<br><span style="font-size:13px;opacity:.7">See you next time!</span></div>`;
   }
   document.getElementById("ot-form").classList.remove("open");
@@ -1198,28 +1246,34 @@ async function confirmClock(){
   CACHE['rx3_clockEvents']=localEvents;
   try{localStorage.setItem('rx3_clockEvents',JSON.stringify(localEvents));}catch(e){}
 
-// ── Step 2: Save clock event to Supabase immediately ─────
-const { error } = await supabaseClient2
-  .from('clock_events')
-  .upsert({
-    id: serverEvent.id,
-    emp_id: serverEvent.empId,
-    shift_id: serverEvent.shiftId || null,
-    type: serverEvent.type,
-    date: serverEvent.date,
-    time: serverEvent.time,
-    ts: serverEvent.ts,
-    reason: serverEvent.reason || null,
-    photo_url: null,
-    synced: true,
-    created_at: new Date().toISOString(),
-    synced_at: new Date().toISOString()
-  }, { onConflict: 'id' });
-
-if (error) throw error;
-
-// ── Step 3: Keep photo/outbox as secondary backup ────────
+// ── Step 2: Queue first, then attempt Supabase immediately ──
+// Queueing before the network request is essential: if Supabase is briefly
+// unavailable, the event still retries and the Manager Portal will receive it.
 outbox_add(serverEvent, photo);
+
+try {
+  const { error } = await supabaseClient2
+    .from('clock_events')
+    .upsert({
+      id: serverEvent.id,
+      emp_id: serverEvent.empId,
+      shift_id: serverEvent.shiftId || null,
+      type: serverEvent.type,
+      date: serverEvent.date,
+      time: serverEvent.time,
+      ts: serverEvent.ts,
+      reason: serverEvent.reason || null,
+      photo_url: null,
+      synced: true,
+      created_at: new Date().toISOString(),
+      synced_at: new Date().toISOString()
+    }, { onConflict: 'id' });
+  if (error) throw error;
+  // The outbox worker will upload the photo and remove the queued item.
+  outbox_flush();
+} catch (error) {
+  console.warn('[CLOCK] Immediate Supabase save failed; queued for retry:', error.message);
+}
 
 showSuccess();
 }
@@ -1362,10 +1416,8 @@ DB.preload(ALL_KEYS, function(){
   renderGrid();
 });
 
-// No automatic refresh for clockEvents here.
-// The clock writes events to Supabase, and the Manager Portal reads them from Supabase.
-// Refreshing clockEvents during active use could overwrite unsynced local outbox events.
-// We only refresh roster/supporting data as needed.
+// Today's clock events are refreshed and merged with local/outbox events.
+// This keeps the Manager Portal, database and clock aligned without losing unsynced activity.
 // ═══════════════════════════════════════════════════════════
 //  PERSISTENT OUTBOX — guarantees every clock event reaches Supabase
 //
@@ -1539,7 +1591,7 @@ setInterval(outbox_flush, 8000);
 setInterval(async () => {
   try {
     await new Promise(resolve => DB.refresh(
-      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays'], resolve
+      ['shifts', 'staff', 'clockEvents', 'settings', 'leaveRequests', 'sickDays'], resolve
     ));
     if (document.getElementById('screen-home')?.classList.contains('active')) renderGrid();
   } catch(e) {}
@@ -1554,12 +1606,11 @@ async function clockRefresh() {
   if (icon) icon.style.transform = 'rotate(720deg)';
   _setSyncIndicator('loading');
   try {
-    // Do not reload clockEvents here. Staff use this button during the day
-    // to pull updated roster/supporting data only; active clock status is kept
-    // from the local clock cache/outbox so it cannot be wiped by a stale server response.
+    // Pull today's authoritative roster and server events, then merge them with
+    // local/outbox events so refresh can never erase an active clock-in.
     await outbox_flush();
     await new Promise(resolve => DB.refresh(
-      ['shifts', 'staff', 'settings', 'leaveRequests', 'sickDays', 'otRequests'],
+      ['shifts', 'staff', 'clockEvents', 'settings', 'leaveRequests', 'sickDays', 'otRequests'],
       resolve
     ));
     renderGrid();
