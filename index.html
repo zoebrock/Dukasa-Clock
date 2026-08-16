@@ -1348,7 +1348,7 @@ function toggleOT(){
   document.getElementById("ot-form").classList.toggle("open");
 }
 
-function submitOT(){
+async function submitOT(){
   const start=document.getElementById("ot-start").value;
   const end=document.getElementById("ot-end").value;
   const reason=document.getElementById("ot-reason").value.trim();
@@ -1358,9 +1358,10 @@ function submitOT(){
     return;
   }
 
-  const reqs=DB.get("otRequests")||[];
+  const submitBtn=document.querySelector(".ot-submit");
+  if(submitBtn){ submitBtn.disabled=true; submitBtn.textContent="Submitting..."; }
 
-  reqs.push({
+  const newReq={
     id:"ot"+Date.now(),
     empId:currentEmp.id,
     date:TODAY(),
@@ -1373,14 +1374,47 @@ function submitOT(){
     requestedBy:"staff",
     staffRead:false,
     submitted:new Date().toISOString()
-  });
+  };
 
-  DB.set("otRequests",reqs);
+  // OT requests must land in the same Supabase ot_requests table the Manager
+  // Portal reads for approval. DB.set() here would route through the legacy
+  // Apps Script "set" action (localStorage/PropertiesService) — the Manager
+  // Portal never reads from there, so the request would be saved but never
+  // actually appear for approval. Insert straight into Supabase instead,
+  // matching the column names the Manager Portal itself writes/reads.
+  const row={
+    id:newReq.id,
+    emp_id:newReq.empId,
+    date:newReq.date,
+    start:newReq.start,
+    end:newReq.end,
+    reason:newReq.reason,
+    task:newReq.task,
+    avail_confirmed:newReq.availConfirmed,
+    approved:newReq.approved,
+    requested_by:newReq.requestedBy,
+    staff_read:newReq.staffRead,
+    submitted:newReq.submitted
+  };
 
-  document.getElementById("ot-form").classList.remove("open");
-  document.getElementById("ot-reason").value="";
+  try{
+    const {error}=await supabaseClient2.from("ot_requests").insert(row);
+    if(error) throw error;
 
-  alert("OT request submitted!");
+    const reqs=DB.get("otRequests")||[];
+    reqs.push(newReq);
+    CACHE["rx3_otRequests"]=reqs;
+    try{ localStorage.setItem("rx3_otRequests", JSON.stringify(reqs)); }catch(e){}
+
+    document.getElementById("ot-form").classList.remove("open");
+    document.getElementById("ot-reason").value="";
+    alert("OT request submitted!");
+  }catch(e){
+    console.error("OT request failed:", e);
+    alert("Could not submit OT request: "+e.message);
+  }finally{
+    if(submitBtn){ submitBtn.disabled=false; submitBtn.textContent="Submit OT request"; }
+  }
 }
 
 function seedIfEmpty(){
