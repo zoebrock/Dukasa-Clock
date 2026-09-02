@@ -35,6 +35,11 @@ input,textarea{font-family:inherit;-webkit-appearance:none}
 .search-input:focus{outline:2px solid var(--purple);border-color:transparent}
 .shift-count{font-size:11px;color:var(--t3);white-space:nowrap}
 .today-bar{padding:4px 28px 12px;font-size:11px;color:var(--t3)}
+.events-strip{display:flex;gap:8px;overflow-x:auto;padding:0 28px 14px;-webkit-overflow-scrolling:touch}
+.event-chip{flex-shrink:0;display:flex;align-items:center;gap:8px;background:var(--surface,#fff);border:1px solid var(--border,#e5e3dd);border-radius:12px;padding:8px 12px;min-width:180px;max-width:260px}
+.event-chip-date{flex-shrink:0;width:36px;height:36px;border-radius:8px;background:var(--pl,#EEEDFE);color:var(--purple,#534AB7);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9px;font-weight:700;line-height:1.1}
+.event-chip-title{font-size:12px;font-weight:600;color:var(--text,#181816);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.event-chip-sub{font-size:10px;color:var(--t3,#98988f);margin-top:1px}
 .staff-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;padding:4px 28px calc(var(--safe-bottom) + 24px);align-content:start;overflow-y:auto;flex:1}
 .staff-tile{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);padding:20px 14px 16px;text-align:center;cursor:pointer;transition:all .12s;position:relative}
 .staff-tile:active{transform:scale(.96);background:var(--s2)}
@@ -182,6 +187,7 @@ canvas{display:none}
     <span class="shift-count" id="shift-count"></span>
   </div>
   <div class="today-bar" id="today-bar"></div>
+  <div class="events-strip" id="events-strip" style="display:none"></div>
   <div class="staff-grid" id="staff-grid"></div>
 </div>
 
@@ -1448,7 +1454,53 @@ DB.preload(ALL_KEYS, function(){
   seedIfEmpty();
   startClock();
   renderGrid();
+  loadAndRenderUpcomingEvents();
 });
+
+// Compact "upcoming events" strip on the kiosk home screen — read-only, shows
+// what's coming up for the whole team regardless of audience targeting (this
+// is a shared physical screen, not a personal one, so there's no single
+// "current staff member" to filter by).
+function _escC(v){
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+async function loadAndRenderUpcomingEvents(){
+  const strip = document.getElementById('events-strip');
+  if(!strip) return;
+  try {
+    const today = _clockTodayString();
+    const { data, error } = await supabaseClient2
+      .from('calendar_events')
+      .select('*')
+      .order('date', { ascending: true });
+    if(error){ strip.style.display = 'none'; return; }
+
+    const upcoming = (data || [])
+      .filter(e => (e.end_date || e.date) >= today)
+      .slice(0, 8);
+
+    if(!upcoming.length){ strip.style.display = 'none'; return; }
+
+    strip.style.display = 'flex';
+    strip.innerHTML = upcoming.map(e => {
+      const d = new Date(e.date + 'T00:00:00');
+      const dayNum = d.getDate();
+      const monLabel = d.toLocaleDateString('en-AU', { month: 'short' }).toUpperCase();
+      const isToday = e.date === today;
+      const sub = isToday ? 'Today' + (e.time ? ' · ' + _escC(e.time) : '') : d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
+      return `<div class="event-chip">
+        <div class="event-chip-date">${monLabel}<div style="font-size:14px">${dayNum}</div></div>
+        <div style="min-width:0">
+          <div class="event-chip-title">📅 ${_escC(e.title)}</div>
+          <div class="event-chip-sub">${_escC(sub)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(err) {
+    console.warn('Could not load upcoming events:', err.message);
+    strip.style.display = 'none';
+  }
+}
 
 // Today's clock events are refreshed and merged with local/outbox events.
 // This keeps the Manager Portal, database and clock aligned without losing unsynced activity.
@@ -1648,6 +1700,7 @@ async function clockRefresh() {
       resolve
     ));
     renderGrid();
+    loadAndRenderUpcomingEvents();
     _setSyncIndicator('saved');
     if (ind) {
       ind.textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU',
