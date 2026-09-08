@@ -814,6 +814,21 @@ function INI(e){return(e.first[0]+e.last[0]).toUpperCase()}
 function TODAY(){return FD(new Date())}
 function NOWT(){return new Date().toTimeString().slice(0,5)}
 function MD(a,b){if(!a||!b)return null;const[ah,am]=a.split(":").map(Number);const[bh,bm]=b.split(":").map(Number);return(bh*60+bm)-(ah*60+am);}
+
+// Break policy, keyed off the shift's total (gross) rostered hours — recomputed
+// fresh from todayShift.start/end every time, so it automatically follows a
+// shift that's been extended by approved OT without anything needing to
+// separately "update" a stored break value.
+//   3–5h   = 10 min
+//   6–7.5h = 40 min
+//   8h+    = 50 min
+//   <3h    = no mandated break
+function getAllottedBreakMins(grossH){
+  if(grossH>=8) return 50;
+  if(grossH>=6) return 40;
+  if(grossH>=3) return 10;
+  return 0;
+}
 function SS(id){
   const isModal=document.getElementById(id)&&document.getElementById(id).classList.contains("modal-overlay-dk");
   if(isModal){
@@ -1025,14 +1040,7 @@ function renderActionScreen(){
   else if(todayShift){
     const grossH=(MD(todayShift.start,todayShift.end))/60;
 
-    // Break policy:
-    // > 8 hours = 50 min total break
-    // exactly 8 hours = 40 min total break
-    // shorter shifts = 30 min total break
-    const totalBrk =
-      grossH > 8 ? 50 :
-      grossH >= 8 ? 40 :
-      30;
+    const totalBrk = getAllottedBreakMins(grossH);
 
     const paidBrk = 30;
     const unpaidBrk = Math.max(0, totalBrk - paidBrk);
@@ -1065,7 +1073,7 @@ function renderActionScreen(){
     if(onBreak){addBtn(btns,"break-end","End break","abtn-brk-end",false);addBtn(btns,"clock-out","Clock out","abtn-out",false);}
     else{
       const grossH2=(MD(todayShift.start,todayShift.end))/60;
-      const totalBrk2=grossH2>8?50:grossH2>=8?40:30;
+      const totalBrk2=getAllottedBreakMins(grossH2);
       const remBrk2=Math.max(0,totalBrk2-usedBreakMins2);
       if(remBrk2>0) addBtn(btns,"break-start","Start break","abtn-brk",false);
       addBtn(btns,"clock-out","Clock out","abtn-out",false);
@@ -1140,16 +1148,35 @@ function setConfirmState(enabled){
 
 function checkReason(){
   if(!currentShiftId)return;const shifts=DB.get("shifts")||[];const s=shifts.find(x=>x.id===currentShiftId);if(!s)return;
-  const clockInGrace=parseInt((DB.get("settings")||{gracePeriod:5}).gracePeriod)||5;
+  const clockInLateGrace=parseInt((DB.get("settings")||{gracePeriod:5}).gracePeriod)||5; // late clock-in tolerance — tunable in Manager Portal Settings
+  const clockInEarlyGrace=10; // 10-min grace before clocking in early needs a reason
+  const clockOutEarlyGrace=clockInLateGrace;
   const clockOutLateGrace=10; // 10-min grace after shift end before asking for reason
   const now=new Date();const nowMins=now.getHours()*60+now.getMinutes();
-  const ref=(currentAction==="clock-in"||currentAction==="break-start")?s.start:s.end;if(!ref)return;
-  const[rh,rm]=ref.split(":").map(Number);const diff=nowMins-(rh*60+rm);let msg="";
-  if(currentAction==="clock-in"&&diff<-clockInGrace)msg=`You are ${Math.abs(diff)} min early (shift starts ${s.start}).`;
-  if(currentAction==="clock-in"&&diff>clockInGrace)msg=`You are ${diff} min late (shift started ${s.start}).`;
-  if(currentAction==="clock-out"&&diff<-clockInGrace)msg=`Clocking out ${Math.abs(diff)} min early (shift ends ${s.end}).`;
-  // Clock-out late: only ask for reason if MORE than 10 minutes past shift end
-  if(currentAction==="clock-out"&&diff>clockOutLateGrace)msg=`Clocking out ${diff} min late (shift ended ${s.end}). Please note the reason.`;
+  const ref=(currentAction==="clock-in"||currentAction==="break-start")?s.start:s.end;
+  let msg="";
+  if(ref){
+    const[rh,rm]=ref.split(":").map(Number);const diff=nowMins-(rh*60+rm);
+    if(currentAction==="clock-in"&&diff<-clockInEarlyGrace)msg=`You are ${Math.abs(diff)} min early (shift starts ${s.start}).`;
+    if(currentAction==="clock-in"&&diff>clockInLateGrace)msg=`You are ${diff} min late (shift started ${s.start}).`;
+    if(currentAction==="clock-out"&&diff<-clockOutEarlyGrace)msg=`Clocking out ${Math.abs(diff)} min early (shift ends ${s.end}).`;
+    // Clock-out late: only ask for reason if MORE than 10 minutes past shift end
+    if(currentAction==="clock-out"&&diff>clockOutLateGrace)msg=`Clocking out ${diff} min late (shift ended ${s.end}). Please note the reason.`;
+  }
+  // Break over allowance — the allowance itself follows the shift's current
+  // (possibly OT-extended) total hours, via getAllottedBreakMins.
+  if(currentAction==="break-end"){
+    const dayState=getEmployeeDayState(DB.get("clockEvents")||[],currentEmp.id,TODAY());
+    const activeBreak=dayState.activeBreak;
+    if(activeBreak&&activeBreak.start){
+      const startMs=activeBreak.start.ts?new Date(activeBreak.start.ts).getTime():new Date(`${activeBreak.start.date}T${activeBreak.start.time}:00`).getTime();
+      const elapsedMins=Math.max(0,Math.floor((Date.now()-startMs)/60000));
+      const grossH=(MD(s.start,s.end))/60;
+      const allotted=getAllottedBreakMins(grossH);
+      const totalUsed=dayState.usedMins+elapsedMins;
+      if(totalUsed>allotted)msg=`Break is ${totalUsed-allotted} min over your ${allotted}-min allowance. Please note the reason.`;
+    }
+  }
   if(msg){document.getElementById("reason-block").style.display="block";document.getElementById("reason-warn").textContent=msg;}
 }
 
