@@ -15,9 +15,10 @@
 <title>Dukasa Time Clock</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;user-select:none}
-:root{--bg:#f5f5f3;--surface:#ffffff;--s2:#f0efe9;--s3:#e4e3dc;--border:#dddcd5;--border2:#c8c7bf;--text:#181816;--t2:#58584e;--t3:#98988a;--purple:#534AB7;--pl:#EEEDFE;--pd:#3C3489;--teal:#0F6E56;--tl:#E1F5EE;--td:#085041;--amber:#BA7517;--al:#FAEEDA;--ad:#633806;--red:#A32D2D;--rl:#FCEBEB;--rd:#791F1F;--green:#3B6D11;--gl:#EAF3DE;--gd:#27500A;--r:14px;--rsm:9px;--safe-top:env(safe-area-inset-top,0px);--safe-bottom:env(safe-area-inset-bottom,20px);}
+:root{--bg:#f2ede2;--surface:#fffdf8;--s2:#f4f0e3;--s3:#e9e3d2;--border:#e2dcc9;--border2:#d3cbb2;--text:#1a1a1a;--t2:#6b6459;--t3:#9a927f;--purple:#534AB7;--pl:#EEEDFE;--pd:#3C3489;--teal:#0F6E56;--tl:#E1F5EE;--td:#085041;--amber:#BA7517;--al:#FAEEDA;--ad:#633806;--red:#A32D2D;--rl:#FCEBEB;--rd:#791F1F;--green:#3B6D11;--gl:#EAF3DE;--gd:#27500A;--font-serif:Georgia,'Iowan Old Style','Palatino Linotype',Palatino,serif;--r:14px;--rsm:9px;--safe-top:env(safe-area-inset-top,0px);--safe-bottom:env(safe-area-inset-bottom,20px);}
 html{height:100%}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100%;display:flex;flex-direction:column;overscroll-behavior:none}
+.serif-heading{font-family:var(--font-serif);font-weight:400}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit;-webkit-appearance:none}
 input,textarea{font-family:inherit;-webkit-appearance:none}
 .screen{display:none;flex-direction:column;min-height:100vh;min-height:100dvh}
@@ -176,9 +177,14 @@ canvas{display:none}
     <div><div class="home-logo">Clock Dukasa</div><div class="home-logo-sub">Tap your name to clock in / out</div><div style="font-size:9px;color:var(--t3);margin-top:1px" id="clock-version"></div></div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
       <div><div class="live-clock" id="home-clock">--:--:--</div><div class="live-date" id="home-date"></div></div>
-      <button id="ck-refresh-btn" onclick="clockRefresh()" style="background:var(--purple);color:#fff;border:none;border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0" title="Refresh data from server">
-        <span id="ck-refresh-icon" style="font-size:13px;display:inline-block;transition:transform .4s ease">↻</span> Refresh
-      </button>
+      <div style="display:flex;gap:6px">
+        <button onclick="openBreaksScreen()" style="background:var(--surface);color:var(--text);border:1px solid var(--border2);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0" title="View lunch break times">
+          🍽️ Lunch breaks
+        </button>
+        <button id="ck-refresh-btn" onclick="clockRefresh()" style="background:var(--purple);color:#fff;border:none;border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0" title="Refresh data from server">
+          <span id="ck-refresh-icon" style="font-size:13px;display:inline-block;transition:transform .4s ease">↻</span> Refresh
+        </button>
+      </div>
       <div id="sync-indicator" style="font-size:10px;color:var(--t3)"></div>
     </div>
   </div>
@@ -281,6 +287,17 @@ canvas{display:none}
       </div>
     </div>
 
+  </div>
+</div>
+
+<div class="modal-overlay-dk" id="screen-breaks">
+  <div class="modal-sheet" style="max-width:900px;width:94vw;max-height:88vh;display:flex;flex-direction:column">
+    <div style="padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0">
+      <button class="back-btn" onclick="closeBreaksScreen()">← Back</button>
+      <div class="serif-heading" style="margin:0;font-size:19px;color:var(--text)">Lunch breaks</div>
+      <div style="width:48px"></div>
+    </div>
+    <div id="breaks-body" style="padding:20px;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -843,6 +860,78 @@ function SS(id){
 }
 function closeModals(){
   document.querySelectorAll(".modal-overlay-dk").forEach(s=>s.classList.remove("active"));
+}
+
+// ── LUNCH BREAKS REFERENCE SCHEDULE ──────────────────────────
+// A curated roster of who takes lunch at what time, by role group — not
+// derived from live shift/clock data (unlike the break-allowance logic
+// elsewhere), since which staff share a slot is a rostering decision.
+const BREAK_DAYS=["Monday","Tuesday","Wednesday","Thursday","Friday"];
+const BREAK_SCHEDULE=[
+  {
+    group:"Pharmacists",
+    note:"Pharmacists should only be on the phone for clinical enquiries.",
+    slots:[
+      {time:"12:00 PM",dur:"40 min",days:["Rob, Helena","Rob, Helena","Rob, Helena, Kirti","Rob, Helena, Kirti","Rob, Helena"]},
+      {time:"12:30 PM",dur:"40 min",days:["Sadik, Eneb","Sadik","Sadik, Eneb","Sadik","Sadik, Eneb"]},
+      {time:"1:00 PM",dur:"50 min",days:["Nafisa","Nafisa","Nafisa","Nafisa","Nafisa"]},
+      {time:"1:30 PM",dur:"40 min",days:["Elli, Manisha","Manisha","Elli, Manisha","Manisha","Elli, Manisha"]},
+      {time:"2:00 PM",dur:"40 min",days:["Jonathan","Jonathan","Jonathan","Jonathan","Jonathan"]}
+    ]
+  },
+  {
+    group:"Dispense & lab techs",
+    slots:[
+      {time:"10:30 AM",dur:"10 min",days:["Simon","Simon","Simon","Simon","Simon"]},
+      {time:"11:30 AM",dur:"40 min",days:["Julian, Meryll, Mathew","Julian, Mathew","Julian, Meryll, Mathew","Julian, Mathew","Julian, Meryll, Mathew"]},
+      {time:"12:00 PM",dur:"30 / 40 min",days:["Kim, Simon, Samantha","Kim, Simon, Samantha","Kim, Simon, Samantha","Kim, Simon, Samantha","Kim, Simon, Samantha"]},
+      {time:"12:30 PM",dur:"50 min",days:["Christina, Antigone","Christina, Antigone","Christina, Antigone","Christina, Antigone","Christina, Antigone"]},
+      {time:"1:00 PM",dur:"40 min",days:["Sofia, Aristotle","Sofia, Aristotle","Sofia, Aristotle","Sofia, Aristotle","Sofia, Aristotle"]},
+      {time:"1:30 PM",dur:"40 min",days:["Valerie, Tina, Natalie","Valerie, Tina, Natalie","Valerie, Tina, Natalie","Valerie, Tina, Natalie","Valerie, Tina, Natalie"]},
+      {time:"2:00 PM",dur:"40 min",days:["Arman","Arman","Arman","Arman","Arman"]}
+    ]
+  },
+  {
+    group:"Admin & dispatch",
+    slots:[
+      {time:"12:00 PM",dur:"40 min",days:["Harrison","Harrison","Harrison","Harrison","Harrison"]},
+      {time:"12:30 PM",dur:"40 min",days:["Kush","Kush","Kush","Kush","Kush"]},
+      {time:"1:00 PM",dur:"50 min",days:["Rahal, Crystal","Rahal, Crystal","Rahal, Crystal","Rahal, Crystal","Rahal, Crystal"]},
+      {time:"1:30 PM",dur:"40 min",days:["Nick","Nick","Nick","Nick","Nick"]},
+      {time:"2:00 PM",dur:"50 min",days:["Zoe","Zoe","Zoe","Zoe","Zoe"]}
+    ]
+  }
+];
+
+function renderBreaksSchedule(){
+  const el=document.getElementById("breaks-body");
+  if(!el)return;
+  el.innerHTML=BREAK_SCHEDULE.map(group=>`
+    <div style="margin-bottom:28px">
+      <div class="serif-heading" style="font-size:16px;color:var(--text);margin-bottom:2px">${group.group}</div>
+      ${group.note?`<div style="font-size:12px;color:var(--t3);margin-bottom:10px">${group.note}</div>`:'<div style="height:10px"></div>'}
+      <div style="border:1px solid var(--border);border-radius:14px;overflow:hidden;background:var(--surface)">
+        <div style="display:grid;grid-template-columns:100px repeat(5,1fr);background:var(--s2)">
+          <div style="padding:10px 14px;font-size:10.5px;font-weight:700;letter-spacing:.04em;color:var(--t2);text-transform:uppercase">Time</div>
+          ${BREAK_DAYS.map(d=>`<div style="padding:10px 14px;font-size:10.5px;font-weight:700;letter-spacing:.04em;color:var(--t2);text-transform:uppercase">${d}</div>`).join('')}
+        </div>
+        ${group.slots.map((slot,i)=>`
+          <div style="display:grid;grid-template-columns:100px repeat(5,1fr);${i<group.slots.length-1?'border-bottom:1px solid var(--border)':''}">
+            <div style="padding:14px;font-size:13.5px;font-weight:700;color:var(--text)">${slot.time}</div>
+            ${slot.days.map(names=>`<div style="padding:14px"><div style="font-size:13.5px;color:var(--text)">${names}</div><div style="font-size:11.5px;color:var(--t3);margin-top:2px">${slot.dur}</div></div>`).join('')}
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+function openBreaksScreen(){
+  renderBreaksSchedule();
+  SS("screen-breaks");
+}
+function closeBreaksScreen(){
+  closeModals();
 }
 
 // Switch between panels within the pin modal (pin → clock → success)
