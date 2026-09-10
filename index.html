@@ -12,13 +12,16 @@
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;500;600;700&display=swap" rel="stylesheet">
 <title>Dukasa Time Clock</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;user-select:none}
-:root{--bg:#f2ede2;--surface:#fffdf8;--s2:#f4f0e3;--s3:#e9e3d2;--border:#e2dcc9;--border2:#d3cbb2;--text:#1a1a1a;--t2:#6b6459;--t3:#9a927f;--purple:#534AB7;--pl:#EEEDFE;--pd:#3C3489;--teal:#0F6E56;--tl:#E1F5EE;--td:#085041;--amber:#BA7517;--al:#FAEEDA;--ad:#633806;--red:#A32D2D;--rl:#FCEBEB;--rd:#791F1F;--green:#3B6D11;--gl:#EAF3DE;--gd:#27500A;--font-serif:Georgia,'Iowan Old Style','Palatino Linotype',Palatino,serif;--r:14px;--rsm:9px;--safe-top:env(safe-area-inset-top,0px);--safe-bottom:env(safe-area-inset-bottom,20px);}
+:root{--bg:#f2ede2;--surface:#fffdf8;--s2:#f4f0e3;--s3:#e9e3d2;--border:#e2dcc9;--border2:#d3cbb2;--text:#1a1a1a;--t2:#6b6459;--t3:#9a927f;--purple:#534AB7;--pl:#EEEDFE;--pd:#3C3489;--teal:#0F6E56;--tl:#E1F5EE;--td:#085041;--amber:#BA7517;--al:#FAEEDA;--ad:#633806;--red:#A32D2D;--rl:#FCEBEB;--rd:#791F1F;--green:#3B6D11;--gl:#EAF3DE;--gd:#27500A;--font-serif:Georgia,'Iowan Old Style','Palatino Linotype',Palatino,serif;--font-body:'Raleway',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--r:14px;--rsm:9px;--safe-top:env(safe-area-inset-top,0px);--safe-bottom:env(safe-area-inset-bottom,20px);}
 html{height:100%}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100%;display:flex;flex-direction:column;overscroll-behavior:none}
-.serif-heading{font-family:var(--font-serif);font-weight:400}
+body{font-family:var(--font-body);background:var(--bg);color:var(--text);min-height:100%;display:flex;flex-direction:column;overscroll-behavior:none}
+.serif-heading,.home-logo,.clock-title,.emp-name-lg,.succ-msg,.pin-emp-name{font-family:var(--font-serif);font-weight:400}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit;-webkit-appearance:none}
 input,textarea{font-family:inherit;-webkit-appearance:none}
 .screen{display:none;flex-direction:column;min-height:100vh;min-height:100dvh}
@@ -1550,10 +1553,10 @@ function seedIfEmpty(){
 // Show loading overlay while syncing
 document.body.insertAdjacentHTML(
   'beforeend',
-  '<div id="dk-loader" style="position:fixed;inset:0;background:#f5f5f3;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999">'+
-  '<div style="font-size:22px;font-weight:700;color:#534AB7;margin-bottom:12px">Dukasa Time Clock</div>'+
-  '<div style="font-size:13px;color:#585854;margin-bottom:20px">Connecting to roster data...</div>'+
-  '<div style="width:180px;height:3px;background:#dddcd5;border-radius:2px;overflow:hidden">'+
+  '<div id="dk-loader" style="position:fixed;inset:0;background:#f2ede2;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999">'+
+  '<div style="font-family:Georgia,\'Iowan Old Style\',\'Palatino Linotype\',Palatino,serif;font-size:22px;font-weight:400;color:#534AB7;margin-bottom:12px">Dukasa Time Clock</div>'+
+  '<div style="font-family:\'Raleway\',-apple-system,sans-serif;font-size:13px;color:#6b6459;margin-bottom:20px">Connecting to roster data...</div>'+
+  '<div style="width:180px;height:3px;background:#e2dcc9;border-radius:2px;overflow:hidden">'+
   '<div style="height:100%;background:#534AB7;border-radius:2px;animation:dkpulse 1.2s ease-in-out infinite alternate"></div></div></div>'+
   '<style>@keyframes dkpulse{from{width:20%}to{width:95%}}</style>'
 );
