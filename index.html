@@ -184,6 +184,9 @@ canvas{display:none}
         <button onclick="openBreaksScreen()" style="background:var(--surface);color:var(--text);border:1px solid var(--border2);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0" title="View lunch break times">
           🍽️ Lunch breaks
         </button>
+        <button onclick="openLeaveCalScreen()" style="background:var(--surface);color:var(--text);border:1px solid var(--border2);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0" title="See who's on annual leave">
+          📅 Leave calendar
+        </button>
         <button id="ck-refresh-btn" onclick="clockRefresh()" style="background:var(--purple);color:#fff;border:none;border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0" title="Refresh data from server">
           <span id="ck-refresh-icon" style="font-size:13px;display:inline-block;transition:transform .4s ease">↻</span> Refresh
         </button>
@@ -301,6 +304,17 @@ canvas{display:none}
       <div style="width:48px"></div>
     </div>
     <div id="breaks-body" style="padding:20px;overflow-y:auto"></div>
+  </div>
+</div>
+
+<div class="modal-overlay-dk" id="screen-leave-cal">
+  <div class="modal-sheet" style="max-width:720px;width:94vw;max-height:88vh;display:flex;flex-direction:column">
+    <div style="padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0">
+      <button class="back-btn" onclick="closeLeaveCalScreen()">← Back</button>
+      <div class="serif-heading" style="margin:0;font-size:19px;color:var(--text)">Leave calendar</div>
+      <div style="width:48px"></div>
+    </div>
+    <div id="leave-cal-body" style="padding:20px;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -909,7 +923,14 @@ const BREAK_SCHEDULE=[
 function renderBreaksSchedule(){
   const el=document.getElementById("breaks-body");
   if(!el)return;
-  el.innerHTML=BREAK_SCHEDULE.map(group=>`
+  // Manager-edited schedule (Manager Portal → Settings → Lunch break schedule)
+  // takes over as soon as one's been saved; the hardcoded list below is only
+  // the fallback before that's ever been done.
+  const settings=DB.get("settings")||{};
+  const schedule=Array.isArray(settings.lunchBreakSchedule)&&settings.lunchBreakSchedule.length
+    ? settings.lunchBreakSchedule
+    : BREAK_SCHEDULE;
+  el.innerHTML=schedule.map(group=>`
     <div style="margin-bottom:28px">
       <div class="serif-heading" style="font-size:16px;color:var(--text);margin-bottom:2px">${group.group}</div>
       ${group.note?`<div style="font-size:12px;color:var(--t3);margin-bottom:10px">${group.note}</div>`:'<div style="height:10px"></div>'}
@@ -935,6 +956,70 @@ function openBreaksScreen(){
 }
 function closeBreaksScreen(){
   closeModals();
+}
+
+// ── LEAVE CALENDAR ────────────────────────────────────────────
+// Read-only month view of who's on approved leave each day — reuses the
+// same leaveRequests data already loaded for the sick/leave badges on the
+// home grid, so there's nothing new to sync.
+let _leaveCalMonth=null; // "YYYY-MM"
+function openLeaveCalScreen(){
+  if(!_leaveCalMonth) _leaveCalMonth=TODAY().slice(0,7);
+  renderLeaveCal();
+  SS("screen-leave-cal");
+}
+function closeLeaveCalScreen(){
+  closeModals();
+}
+function changeLeaveCalMonth(delta){
+  const [y,m]=_leaveCalMonth.split("-").map(Number);
+  const d=new Date(y,m-1+delta,1);
+  _leaveCalMonth=FD(d).slice(0,7);
+  renderLeaveCal();
+}
+function renderLeaveCal(){
+  const el=document.getElementById("leave-cal-body");
+  if(!el)return;
+  const staff=DB.get("staff")||[];
+  const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
+  const [y,m]=_leaveCalMonth.split("-").map(Number);
+  const firstOfMonth=new Date(y,m-1,1);
+  const monthLabel=firstOfMonth.toLocaleDateString("en-AU",{month:"long",year:"numeric"});
+  const daysInMonth=new Date(y,m,0).getDate();
+  // Monday-first grid, matching the rest of the app's week layout.
+  const leadBlank=(firstOfMonth.getDay()+6)%7;
+  const today=TODAY();
+
+  const awayOn=(dateStr)=>leaveReqs.filter(l=>l.from<=dateStr&&l.to>=dateStr).map(l=>{
+    const emp=staff.find(s=>_id(s.id)===_id(l.empId));
+    return {name:emp?`${emp.first} ${emp.last}`:"Staff member",type:l.type||"Leave"};
+  });
+
+  let cells="";
+  for(let i=0;i<leadBlank;i++) cells+=`<div style="min-height:70px"></div>`;
+  for(let day=1;day<=daysInMonth;day++){
+    const dateStr=`${y}-${String(m).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+    const away=awayOn(dateStr);
+    const isToday=dateStr===today;
+    cells+=`<div style="min-height:70px;border:1px solid var(--border);border-radius:8px;padding:5px;${isToday?"box-shadow:inset 0 0 0 2px var(--purple);":""}">
+      <div style="font-size:10px;font-weight:700;color:${isToday?"var(--purple)":"var(--t3)"};margin-bottom:3px">${day}</div>
+      ${away.slice(0,3).map(a=>`<div style="font-size:9.5px;background:var(--al);color:var(--ad);border-radius:4px;padding:1px 4px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${_escC(a.name)} — ${_escC(a.type)}">${_escC(a.name)}</div>`).join("")}
+      ${away.length>3?`<div style="font-size:9px;color:var(--t3)">+${away.length-3} more</div>`:""}
+    </div>`;
+  }
+
+  const weekdayHdr=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d=>`<div style="font-size:10px;font-weight:700;color:var(--t3);text-align:center;padding:4px 0">${d}</div>`).join("");
+
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <button class="cam-btn" onclick="changeLeaveCalMonth(-1)">‹</button>
+      <div class="serif-heading" style="font-size:16px">${monthLabel}</div>
+      <button class="cam-btn" onclick="changeLeaveCalMonth(1)">›</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:1px;margin-bottom:4px">${weekdayHdr}</div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px">${cells}</div>
+    <div style="margin-top:14px;font-size:11px;color:var(--t3)">Shows approved leave only (annual, personal, or other approved leave types). Sick days and pending requests aren't included.</div>
+  `;
 }
 
 // Switch between panels within the pin modal (pin → clock → success)
@@ -1057,14 +1142,18 @@ function renderGrid(){
   const staff=q?all.filter(s=>`${s.first} ${s.last}`.toLowerCase().includes(q)):all;
   const today=TODAY();const shifts=DB.get("shifts")||[];const ce=DB.get("clockEvents")||[];
   const sickDays=DB.get("sickDays")||[];const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
-  const todayShifts=shifts.filter(s=>_cleanDate(s.date)===today&&_published(s));
+  // A partial-leave segment is a separate row sharing the employee/date with
+  // their real (reduced-hours) shift — exclude it from "todayShift" or it can
+  // be picked up instead of the actual working hours, and never treat a
+  // partial-day leave REQUEST as a full day off (they still clock in).
+  const todayShifts=shifts.filter(s=>_cleanDate(s.date)===today&&_published(s)&&!(s.entryType==="leave"||s.entry_type==="leave"));
   document.getElementById("shift-count").textContent=`${todayShifts.length} shift${todayShifts.length!==1?"s":""} today`;
   document.getElementById("today-bar").textContent=new Date().toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
   const grid=document.getElementById("staff-grid");grid.innerHTML="";
   staff.forEach(emp=>{
     const todayShift=todayShifts.find(s=>_id(s.empId)===_id(emp.id));
     const isSick=sickDays.find(s=>_id(s.empId)===_id(emp.id)&&s.date===today);
-    const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(emp.id)&&l.from<=today&&l.to>=today);
+    const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(emp.id)&&l.from<=today&&l.to>=today&&(l.requestKind||l.request_kind)!=="partial_day");
     const dayState=getEmployeeDayState(ce,emp.id,today);
     const ci=dayState.clockIn;
     const co=dayState.clockOut;
@@ -1114,9 +1203,10 @@ function renderActionScreen(){
   document.getElementById("act-role").textContent=currentEmp.role;
   const today=TODAY();const shifts=DB.get("shifts")||[];const ce=DB.get("clockEvents")||[];
   const sickDays=DB.get("sickDays")||[];const leaveReqs=(DB.get("leaveRequests")||[]).filter(l=>l.status==="approved");
-  const todayShift=shifts.find(s=>_id(s.empId)===_id(currentEmp.id)&&_cleanDate(s.date)===today&&_published(s));
+  const todayShift=shifts.find(s=>_id(s.empId)===_id(currentEmp.id)&&_cleanDate(s.date)===today&&_published(s)&&!(s.entryType==="leave"||s.entry_type==="leave"));
+  const partialLeaveSeg=shifts.find(s=>_id(s.empId)===_id(currentEmp.id)&&_cleanDate(s.date)===today&&_published(s)&&(s.entryType==="leave"||s.entry_type==="leave"));
   const isSick=sickDays.find(s=>_id(s.empId)===_id(currentEmp.id)&&s.date===today);
-  const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(currentEmp.id)&&l.from<=today&&l.to>=today);
+  const isLeave=leaveReqs.find(l=>_id(l.empId)===_id(currentEmp.id)&&l.from<=today&&l.to>=today&&(l.requestKind||l.request_kind)!=="partial_day");
   const dayState=getEmployeeDayState(ce,currentEmp.id,today);
   const ci=dayState.clockIn;
   const co=dayState.clockOut;
@@ -1155,7 +1245,8 @@ function renderActionScreen(){
     ? ' · includes 30 min paid + ' + unpaidBrk + ' min unpaid'
     : '');
     }
-    sb.innerHTML=`<strong>${todayShift.start} - ${todayShift.end}</strong><br><span style="font-size:12px;color:var(--t2)">${brkLine}</span>${ci?`<br><span style="color:var(--teal);font-size:12px">Clocked in ${ci.time}</span>`:""}${co?`<br><span style="color:var(--green);font-size:12px">Clocked out ${co.time}</span>`:""}`;  }
+    const partialNote=partialLeaveSeg?`<br><span style="color:var(--amber);font-size:12px">Partial leave ${partialLeaveSeg.start}-${partialLeaveSeg.end}</span>`:"";
+    sb.innerHTML=`<strong>${todayShift.start} - ${todayShift.end}</strong><br><span style="font-size:12px;color:var(--t2)">${brkLine}</span>${partialNote}${ci?`<br><span style="color:var(--teal);font-size:12px">Clocked in ${ci.time}</span>`:""}${co?`<br><span style="color:var(--green);font-size:12px">Clocked out ${co.time}</span>`:""}`;  }
   else sb.innerHTML=`<span style="color:var(--t3)">No published shift today</span>`;
   const btns=document.getElementById("act-btns");btns.innerHTML="";
   if(isSick||isLeave){btns.innerHTML=`<div class="complete-msg" style="background:${isSick?"var(--rl)":"var(--al)"};border-color:${isSick?"var(--red)":"var(--amber)"};color:${isSick?"var(--red)":"var(--amber)"}">${isSick?"Sick today":"On leave today"}</div>`;}
