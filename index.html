@@ -199,6 +199,7 @@ canvas{display:none}
     <span class="shift-count" id="shift-count"></span>
   </div>
   <div class="today-bar" id="today-bar"></div>
+  <div id="leave-today-card" style="display:none;margin:0 28px 14px;padding:12px 16px;background:var(--al);border:1px solid var(--amber);border-radius:12px"></div>
   <div class="events-strip" id="events-strip" style="display:none"></div>
   <div class="staff-grid" id="staff-grid"></div>
 </div>
@@ -1136,6 +1137,31 @@ function getEmployeeDayState(events, empId, date) {
   };
 }
 
+// Top-of-home-screen card listing everyone on approved leave today — a
+// quick glance before scanning the whole staff grid for sick/leave badges.
+function renderLeaveTodayCard(allStaff,leaveReqs,today){
+  const card=document.getElementById("leave-today-card");
+  if(!card)return;
+  const away=leaveReqs
+    .filter(l=>l.from<=today&&l.to>=today)
+    .map(l=>{
+      const emp=allStaff.find(s=>_id(s.id)===_id(l.empId));
+      const isPartial=(l.requestKind||l.request_kind)==="partial_day";
+      return emp?{name:`${emp.first} ${emp.last}`,type:l.type||"Leave",isPartial,partialStart:l.partialStart||l.partial_start,partialEnd:l.partialEnd||l.partial_end}:null;
+    })
+    .filter(Boolean)
+    .sort((a,b)=>a.name.localeCompare(b.name));
+
+  if(!away.length){card.style.display="none";return;}
+  card.style.display="block";
+  card.innerHTML=`
+    <div style="font-size:11px;font-weight:700;color:var(--ad);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">🌴 On leave today (${away.length})</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">
+      ${away.map(a=>`<span style="background:var(--surface);border:1px solid var(--border2);border-radius:20px;padding:4px 12px;font-size:12px;font-weight:600;color:var(--text)">${_escC(a.name)}${a.isPartial&&a.partialStart&&a.partialEnd?` <span style="font-weight:400;color:var(--t3)">(partial, ${_escC(a.partialStart)}-${_escC(a.partialEnd)})</span>`:` <span style="font-weight:400;color:var(--t3)">(${_escC(a.type)})</span>`}</span>`).join("")}
+    </div>
+  `;
+}
+
 function renderGrid(){
   const all=[...(DB.get("staff")||[])].sort((a,b)=>a.first.localeCompare(b.first)||a.last.localeCompare(b.last));
   const q=(document.getElementById("staff-search").value||"").toLowerCase().trim();
@@ -1149,6 +1175,7 @@ function renderGrid(){
   const todayShifts=shifts.filter(s=>_cleanDate(s.date)===today&&_published(s)&&!(s.entryType==="leave"||s.entry_type==="leave"));
   document.getElementById("shift-count").textContent=`${todayShifts.length} shift${todayShifts.length!==1?"s":""} today`;
   document.getElementById("today-bar").textContent=new Date().toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  renderLeaveTodayCard(all,leaveReqs,today);
   const grid=document.getElementById("staff-grid");grid.innerHTML="";
   staff.forEach(emp=>{
     const todayShift=todayShifts.find(s=>_id(s.empId)===_id(emp.id));
